@@ -40,3 +40,6 @@ CTestTestfile.cmake
 
 # kimi
 superkimi-master/
+
+# Local Git worktrees
+.worktrees/
