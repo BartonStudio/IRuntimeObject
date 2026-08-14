@@ -81,7 +81,6 @@ void PrintResult(const char* title, bool success) {
 
 int main() {
     using iobject::DataChannelChangedEventData;
-    using iobject::EventHandlerId;
     using iobject::IRuntimeObject;
     using iobject::Runtime;
     using iobject::RuntimeObjectEvent;
@@ -93,10 +92,8 @@ int main() {
     IRuntimeObject* objectB = Runtime::make<CounterState>(10);
     IRuntimeObject* plainObject = Runtime::make();
 
-    RuntimeSubscription subscription = objectA->Observe(
-        objectB, iobject::RuntimeEventTypes::DataChannelChanged);
-    EventHandlerId handlerId = objectA->AddEventHandler(
-        iobject::RuntimeEventTypes::DataChannelChanged,
+    RuntimeSubscription subscription = objectA->SubscribeEvent(
+        objectB, iobject::RuntimeEventTypes::DataChannelChanged,
         [objectB](const RuntimeObjectEvent& event) {
             if (event.data == nullptr) {
                 std::cout << "  DataChannelChanged 未携带数据。\n";
@@ -124,7 +121,6 @@ int main() {
 
     std::cout << "\n1. 建立 A 观察 B 的 DataChannelChanged\n";
     std::cout << "  订阅有效：" << subscription.IsActive() << '\n';
-    std::cout << "  A 的处理器 ID：" << handlerId << '\n';
 
     std::cout << "\n2. WriteData 只写入，不自动通知\n";
     const std::array<std::uint8_t, 4> value20 = Encode(20);
@@ -148,7 +144,7 @@ int main() {
     const bool writePlain = plainObject->WriteData("State", iobject::ByteInput(value20.data(), value20.size()));
     PrintResult("纯运行时节点写入 State", writePlain);
 
-    objectA->RemoveEventHandler(handlerId);
+    subscription.Cancel();
     delete plainObject;
     delete objectB;
     delete objectA;

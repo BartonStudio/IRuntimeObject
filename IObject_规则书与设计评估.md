@@ -12,6 +12,8 @@
 
 `RuntimeObject` 是静态库 `src` 中的私有实现，不是公共类型，调用方不得包含或依赖它。`Runtime` 工厂以 `IRuntimeObject*` 返回节点；调用方负责对每个返回节点执行 `delete`。`Connect` 仅保存非拥有拓扑边，调用方管理节点生命周期。
 
+`IRuntimeObject` 是运行时节点契约，不是业务类型的公开基类。外部业务类型不得继承并自行构造 `IRuntimeObject`，也不应实现其虚函数后直接接入拓扑；这会绕过框架的生命周期、拓扑和事件登记规则。业务类型应保持普通 C++ 类，通过 `Runtime` 工厂包装。该约定写在公开头文件的接口注释中；框架内部实现保留构造和接入节点的责任。
+
 ## 2. 基本术语
 
 | 术语 | 含义 |
@@ -23,7 +25,7 @@
 
 ## 3. Runtime 创建与承载规则
 
-所有节点由 `Runtime` 创建，并以 `IRuntimeObject*` 返回；调用方必须 `delete` 返回的节点：
+所有节点由 `Runtime` 创建，并以 `IRuntimeObject*` 返回：
 
 - `Runtime::make()`：创建纯运行时节点，可作为对象拓扑的根节点；
 - `Runtime::make<T>(args...)`：创建并持有新建 `T`；
@@ -33,15 +35,31 @@
 - `Runtime::makePointer()`：创建未绑定的 `IRuntimeObjectPointer`；
 - `Runtime::makePointer(IRuntimeObject*)`：创建后立即尝试绑定目标；目标无效时仍返回未绑定指针节点。
 
-普通节点的 `Release()` 只解除节点的全部拓扑关系，不释放运行时节点或承载的原生对象。节点被调用方 `delete` 时，承载的原生对象才按相应持有策略处理。
+普通节点的 `Release()` 解除节点的全部拓扑关系及其相关事件、数据通道订阅关系，不释放运行时节点或承载的原生对象。节点被调用方 `delete` 时，承载的原生对象才按相应持有策略处理。当前尚未提供 `DeleteLater` 或统一事件循环；未来若引入单线程事件循环，将由延迟删除机制处理回调栈中的销毁请求。
+
+### 3.0 运行时调用栈与物理删除时机
+
+当前框架的事件、拓扑操作和数据通道均为同步调用，并允许在回调中重入其他运行时操作。一次最外层 `Publish`、`Connect`、`Disconnect`、`ReadData` 或 `WriteData`，连同其同步触发的事件、数据回调、`SubscribeChannel` 传播及嵌套调用，共同构成一个运行时调用范围。
+
+运行时调用范围尚未返回时，不得直接物理 `delete` 可能仍被本次调用访问的 `IRuntimeObject` 节点。特别是事件处理器、`ReadData` 接收器、原生对象的 `WriteData` 实现、拓扑事件回调和同步传播过程中，都不应删除当前或相关拓扑/同步组成员；否则快照中的非拥有指针可能立即变成悬垂指针，导致未定义行为或同步只完成部分成员。
+
+安全删除至少需要同时满足：
+
+1. 当前最外层运行时调用及其全部同步嵌套回调已经返回；
+2. 节点已经不再需要参与拓扑、订阅、数据同步或其他业务访问；
+3. 调用方确认自己拥有该节点的唯一物理删除责任，且没有其他代码仍持有并访问它。
+
+在当前模型中，业务方如需在回调栈中释放节点，应先记录待处理节点，等最外层运行时调用返回后，再执行 `Release()` 和 `delete`。未来设计单线程事件循环时，应增加 `DeleteLater` 一类的延迟删除机制：它只提交销毁请求，由事件循环在当前任务及其嵌套调用结束后执行 `Release()` 与物理 `delete`。该机制属于未来能力，当前接口不提供。
+
+`Release()` 与 `delete` 始终是两个不同动作：`Release()` 负责退出 IRuntimeObject 系统，`delete` 负责销毁 C++ 节点及其按持有策略管理的原生对象。未来延迟删除所需的“待处理”状态是运行时内部调度细节，不作为当前公开 `Release()` 状态的一部分；当前不新增任何 `Queued` 枚举或相关接口。
 
 ### 3.1 透明指针节点
 
 `IRuntimeObjectPointer` 是不拥有目标生命周期的可换绑节点。它通过 `Bind(IRuntimeObject*)` 绑定普通活动运行时节点，`Unbind()` 解除绑定，`GetBindObject()` 读取当前目标，`IsBound()` 查询状态；`Bind(nullptr)` 等同于 `Unbind()` 并成功。第一版拒绝绑定自身、另一指针节点、已 Release 的节点及不同运行时拓扑中的节点。
 
-已绑定指针在**调用当次**透明转发 `AddEventHandler`、`RemoveEventHandler`、`Observe`、`Publish`、数据通道和拓扑查询/操作到目标；未绑定时返回对应失败或空结果，不缓存操作。指针不维护自己的处理器、订阅或拓扑边，换绑不会迁移或撤销先前经它建立在旧目标上的关系，调用方须自行管理旧 ID 与订阅句柄。`Publish` 的 `data` 始终是事件载荷而非目标参数，不会被解引用。
+已绑定指针在**调用当次**透明转发 `SubscribeEvent`、`Publish`、数据通道和拓扑查询/操作到目标；未绑定时返回对应失败或空结果，不缓存操作。指针不维护自己的处理器、订阅或拓扑边，换绑不会迁移或撤销先前经它建立在旧目标上的关系，调用方须自行管理 `RuntimeSubscription` 句柄。`Publish` 的 `data` 始终是事件载荷而非目标参数，不会被解引用。
 
-`pointer->As<IRuntimeObjectPointer>()` 返回指针节点自身；其余 `pointer->As<T>()` 在已绑定时查询当前目标。普通节点将 pointer 用作 `Connect` 的 child 或 `Observe` 的 source 参数时，也只在该次调用解引用当前目标：空指针节点失败，既有边与订阅不会随之后的 `Bind()` 改变。
+`pointer->As<IRuntimeObjectPointer>()` 返回指针节点自身；其余 `pointer->As<T>()` 在已绑定时查询当前目标。普通节点将 pointer 用作 `Connect` 的 child 或 `SubscribeEvent` 的 source 参数时，也只在该次调用解引用当前目标：空指针节点失败，既有边与订阅不会随之后的 `Bind()` 改变。
 
 目标 `Release()` 或析构时，运行时会自动解除全部指向它的指针绑定，避免悬垂指针；指针从不 `Release` 或 `delete` 目标。指针自身 `Release()` 只撤销绑定并停用该指针，不影响目标，也不产生 `Released` 事件；调用方仍须 `delete` 指针节点。
 
@@ -92,7 +110,7 @@ bool WriteData(iobject::DataChannelView channel,
 
 `ByteView` 只在读取接收器调用期间有效；需要长期保留时，调用方必须在回调中复制字节，不能保存 `data()` 指针或视图。`ByteInput` 也只在 `WriteData` 当前调用期间有效；原生类若要长期保存输入必须自行复制。原生类自行决定数据组成与编码，框架不解释其内容。不要通过 `reinterpret_cast` 直接把含指针、`std::string`、容器或虚表的 C++ 对象内存暴露为跨边界数据。
 
-数据读写与变化通知是刻意分离的两个业务动作。框架不会因 `WriteData` 返回成功而自动发布事件，也不会验证数据是否真实变化；原生对象在自身运行中直接修改成员变量时同样不会被框架自动感知。业务方确认某通道发生需要观察者处理的逻辑变化后，应显式发布：
+数据读写与变化通知是刻意分离的两个业务动作。框架不会因业务直接调用 `WriteData` 返回成功而自动发布事件，也不会验证数据是否真实变化；原生对象在自身运行中直接修改成员变量时同样不会被框架自动感知。业务方确认某通道发生需要观察者处理的逻辑变化后，应显式发布：
 
 ```cpp
 object->Publish(
@@ -101,7 +119,45 @@ object->Publish(
     true);
 ```
 
-订阅者收到事件后检查其中的 `channel`，再按需调用 `ReadData` 获取当前数据；框架不将字节直接推送给订阅者、不缓存数据，也没有版本号、错误对象或后台队列。原生读写逻辑、读取接收器和事件处理器抛出的 C++ 异常保持原样向调用方传播，异常策略由业务代码负责。
+### 3.3 数据通道订阅
+
+`SubscribeChannel` 是已实现的本地、同步、无初始快照的通道同步关系。它有三种等价入口，均返回可移动、不可复制的 `RuntimeSubscription`：
+
+```cpp
+// 当前对象是 target，源与目标通道同名。
+target->SubscribeChannel(source, channel);
+
+// 当前对象是 target，允许将源通道映射到另一目标通道。
+target->SubscribeChannel(source, sourceChannel, targetChannel);
+
+// 不以某一端作为调用者的公共形式。
+iobject::SubscribeChannel(source, sourceChannel, target, targetChannel);
+```
+
+建立订阅只登记关系，绝不读取、写入或执行初始同步。源、目标、任一通道为空，端点已 `Release()`、析构、失效或不在同一运行时拓扑时，返回失效句柄。`IRuntimeObjectPointer` 作为 source 或 target 时仅在建立调用的当次解引用；之后 `Bind()`、`Unbind()` 或换绑均不会迁移已建立关系。
+
+通道同步只识别规范的变化通知：事件类型必须精确为 `RuntimeEventTypes::DataChannelChanged`，`event.data` 必须非空且 `event.data->As<DataChannelChangedEventData>()` 成功，并且事件源和载荷中的 `channel` 必须分别精确匹配登记的源对象与源通道。其他事件、空或错误载荷、以及通道不匹配均被静默忽略，不影响普通事件订阅。
+
+每一条匹配关系在当前调用栈内依次执行“源 `ReadData` → 接收器恰好一次 → 目标 `WriteData`”。读取失败、接收器不是恰好一次、写入失败、端点在过程中 `Release` / 析构 / 失效，都会静默停止该分支。只有这三步都成功后，框架才会自动向目标发布带目标通道的规范 `DataChannelChanged`，使下游订阅继续同步；这项自动发布仅属于 `SubscribeChannel` 的成功同步过程，业务直接调用 `WriteData` 后仍须自行 `Publish` 变化事件。
+
+单次通道变化传播维护独立的当前路径。某分支准备进入的目标已在其路径中时，框架会向 `std::cerr` 输出：
+
+```text
+[IObject] 数据通道同步截断：检测到重复节点
+```
+
+随后停止该分支。例如 `A -> B -> C -> B -> E` 在第二次进入 B 时终止，E 不会执行；兄弟分支彼此独立。事件派发的全局保险同样适用于其自动发布：最大嵌套深度为 32、单链路最大成功发布次数为 128。
+
+`RuntimeSubscription` 的析构和幂等 `Cancel()` 均会解除通道订阅；源或目标 `Release` / 析构时也会自动解除，失效句柄的 `IsActive()` 返回 `false`。`SubscribeEvent` 与 `SubscribeChannel` 共用这一句柄模型。普通事件订阅者仍可在收到 `DataChannelChanged` 后自行检查通道并按需 `ReadData`；框架不直接向它们推送字节，不缓存数据，也没有版本号、错误对象或后台队列。原生读写逻辑、读取接收器和事件处理器抛出的 C++ 异常保持原样向调用方传播，异常策略由业务代码负责。
+
+### 3.4 数据通道后续演进（未来设计）
+
+当前本地同步保持同步、逐次、无状态：一次变化会立即读取源通道并写入目标，不保存字节、不压缩连续变化，也不向后台提交任务。以下能力尚未实现；`SubscribeChannel` 只是未来远程能力可复用的本地基础：
+
+- **通道缓存**：为对象与通道保存最近一次成功读取的字节副本。它可供新订阅关系取得初始快照、在短暂不可读或远端断线时使用最后有效值，并让一次读取服务多个目标；同时必须定义内存上限、缓存失效与对象 `Release` 后的清理规则。
+- **变更合并**：将同一对象、同一通道在一个未来事件循环批次内的多次连续变化压缩为最终状态，降低高频状态同步的读取、复制和写入开销。合并会丢失中间状态，因此只适用于状态快照，不能默认用于每次操作都必须可见的命令、日志或交易类通道。
+- **异步任务队列**：把通道读取、写入和传播从当前发布调用栈延后到未来事件循环执行。它是控制长传播链、支持合并、优先级、跨线程与 `deleteLater()` 安全析构的基础；引入后必须明确执行顺序、可见时机、任务取消、失败与源/目标在任务执行前 `Release` 的行为。
+- **远程传输与桥接**：远程代理、连接桥接、稳定对象身份映射和网络协议均未实现。未来若接入 Socket、WebSocket、共享内存或串口等传输，必须另行定义连接、初始快照、重连、顺序、重复投递、双向回环与权限语义，不能将其视为当前本地订阅的既有能力。
 
 ## 4. 拓扑规则与事件
 
@@ -127,14 +183,13 @@ delete root;
 - `GetChildren() const` 是只读查询，返回名称和非拥有 `IRuntimeObject*` 组成的快照，不暴露内部容器；其中指针在 `Disconnect`、`Release`、覆盖、子节点析构或父节点析构后失效；
 - 成功 `Disconnect` 会在拓扑更新后同步发送 `ChildDisconnected`；业务方可通过 `Publish` 发布自定义字符串事件；
 - `RuntimeEventTypes` 命名空间公开内置字符串常量：`ChildConnected`、`ChildDisconnected`、`DataChannelChanged`、`Released`。它们与业务自定义字符串完全共用 `RuntimeEventTypeView` 的唯一 API 和统一的字符串键匹配规则；
-- `AddEventHandler`、`Observe`、`Publish` 接受 `RuntimeEventTypes` 中的内置常量或自定义字符串。字符串大小写敏感，空字符串不能注册处理器或建立订阅，空字符串发布无操作；事件类型在内部复制保存，调用方传入的临时字符串可安全使用；
+- `SubscribeEvent(source, type, handler)` 是唯一的事件登记接口，接受 `RuntimeEventTypes` 中的内置常量或自定义字符串。调用者是订阅者，source 是事件源，三者必须在同一运行时拓扑内且处于活动状态；监听自身也必须显式传入自身。字符串大小写敏感，空 source、type 或 handler 不会建立订阅，空字符串发布无操作；事件类型在内部复制保存，调用方传入的临时字符串可安全使用；
 - `RuntimeObjectEvent::data` 是可空、非拥有的 `const IRuntimeObject*` 事件载荷视图，仅在当前同步回调期间有效，不得保存。需要取得具体事件数据时统一调用 `event.data->As<T>()`，不直接使用 `dynamic_cast`；该转换与普通运行时节点一致，支持原包装类型及其 `RegisterTypes` 规则。`ChildConnected` 与 `ChildDisconnected` 使用包装后的 `ChildEventData`，其中包含子边名称和非拥有 child 指针；`DataChannelChanged` 使用包装后的 `DataChannelChangedEventData`，其中包含发生逻辑变化的通道名称。业务载荷可通过 `Runtime::make<T>(...)` 构造。该事件只通知变化，观察者收到后应按需调用事件源的 `ReadData` 读取当前数据；
 - `Publish(type, data, false)` 只借用非空 `data`，调用方仍负责其 `delete`；`Publish(type, data, true)` 从调用开始接管独占删除责任，在完整同步派发结束、未投递或处理器异常离开时均会 `delete data`。不得将同一指针重复以 `true` 交付，也不得将当前 `event.data` 以 `true` 交给嵌套 `Publish`；嵌套发布各自管理载荷，内层结束先析构内层载荷，不影响外层载荷；
 - `Released` 表示节点已退出 IRuntimeObject 对象系统，实际发生在节点内存失效前。其 `source` 只可在当前回调中作地址身份比较，不应调用或保存；
 - 其他事件的 `RuntimeObjectEvent::source` 也只应在处理器执行期间使用；
-- 每个节点组合私有的 `RuntimeEventDispatcher`，在本地管理 `EventHandlerId -> {事件类型, EventHandler}` 的同步处理器表；`AddEventHandler` / `RemoveEventHandler` 只管理本节点的处理器，不创建对象间订阅；
-- `Observe(source, type)` 仅允许同一运行时拓扑内的两个 `IRuntimeObject` 建立订阅者到事件源的关系，返回可移动且不可复制的 `RuntimeSubscription`。句柄析构自动取消，也可调用幂等的 `Cancel()`；任一端 `Release` 或 `delete` 都会自动解绑，失效句柄的 `IsActive()` 返回 `false`；
-- 发布先投递事件源自身的匹配处理器，再按订阅关系同步投递给订阅者；订阅者没有匹配处理器时事件直接丢弃，不保存收件箱或队列；
+- 订阅关系直接保存 `EventHandler`，不再拆分本地处理器表与对象间观察关系；`SubscribeEvent(source, type, handler)` 原子建立一条订阅并返回可移动且不可复制的 `RuntimeSubscription`。句柄析构自动取消，也可调用幂等的 `Cancel()`；任一端 `Release` 或 `delete` 都会自动解绑，失效句柄的 `IsActive()` 返回 `false`；
+- 发布按事件源和类型查找订阅快照，并同步执行各订阅保存的回调；没有登记回调的对象不会形成有效订阅，事件直接丢弃，不保存收件箱或队列；
 - 处理器按 ID 顺序快照执行，处理器中增删处理器或取消订阅不破坏当前派发；普通 `Publish`、`Connect`、`Disconnect` 不捕获处理器异常，处理器不得向框架抛出 C++ 异常；`Release` / 析构路径仅为析构安全而吞掉异常。当前仍假定单线程事件循环，不是全局事件总线，也没有异步队列；
 - 同一最外层事件及其同步嵌套发布共享私有派发上下文。若当前活跃路径重复出现相同的 `(事件源指针, 事件类型)`，框架输出诊断并截断该次待发布事件；不禁止自订阅或双向订阅；
 - 同一事件链最大嵌套发布深度为 32、最大成功发布次数为 128。第 33 层或第 129 次待发布事件会向 `std::cerr` 输出中文诊断并被截断；此前已完成的派发不回滚，调用正常返回。

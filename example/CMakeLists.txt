@@ -18,3 +18,6 @@ target_link_libraries(test_06_data_channel_change PRIVATE IObject::IObject)
 
 add_executable(test_07_pointer 07_PointerTest.cpp)
 target_link_libraries(test_07_pointer PRIVATE IObject::IObject)
+
+add_executable(test_08_subscribe_channel 08_SubscribeChannelTest.cpp)
+target_link_libraries(test_08_subscribe_channel PRIVATE IObject::IObject)

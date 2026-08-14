@@ -83,11 +83,6 @@ struct RuntimeObjectEvent {
 };
 
 using EventHandler = std::function<void(const RuntimeObjectEvent&)>;
-using EventHandlerId = std::size_t;
-using EventCallback = EventHandler;
-using SubscriptionId = EventHandlerId;
-using RuntimeObjectEventCallback = EventHandler;
-using RuntimeObjectSubscriptionId = SubscriptionId;
 
 namespace detail {
 
@@ -148,6 +143,11 @@ private:
 };
 
 /// Non-template runtime object contract for tree structure and events.
+///
+/// 构造规则：外部业务类型不得继承并自行构造 IRuntimeObject；
+/// 请通过 Runtime::make、Runtime::ref、Runtime::share 或 Runtime::fromPtr
+/// 包装原生对象，通过 Runtime::make 创建纯运行时节点。框架内部实现
+/// 负责构造并接入运行时节点，调用方只使用这里定义的接口。
 class IRuntimeObject {
 public:
     /// Runtime 创建的节点由调用方 delete；析构会自动解除全部相关拓扑。
@@ -165,12 +165,25 @@ public:
         return static_cast<const T*>(QueryType(std::type_index(typeid(T))));
     }
 
-    /// 使用 RuntimeEventTypes 中的内置常量或业务自定义字符串；空字符串不会注册处理器，事件类型大小写敏感。
-    virtual EventHandlerId AddEventHandler(RuntimeEventTypeView type, EventHandler handler) = 0;
-    virtual bool RemoveEventHandler(EventHandlerId id) = 0;
-    /// 使用 RuntimeEventTypes 中的内置常量或业务自定义字符串；空字符串不会建立订阅。
+    /// 原子建立当前对象对 source 的事件订阅；调用者是订阅者，source 是事件源。
+    /// 使用 RuntimeEventTypes 中的内置常量或业务自定义字符串；空 source、type 或 handler 不会建立订阅。
     /// source 若为 IRuntimeObjectPointer，会在本次调用解引用其当前绑定目标；空指针节点不能建立订阅。
-    virtual RuntimeSubscription Observe(IRuntimeObject* source, RuntimeEventTypeView type) = 0;
+    /// 返回值是唯一的 RAII 取消句柄；监听自身也必须显式传入自身作为 source。
+    virtual RuntimeSubscription SubscribeEvent(IRuntimeObject* source,
+                                                RuntimeEventTypeView type,
+                                                EventHandler handler) = 0;
+
+    /// 当前对象是 target，建立订阅时不会读取或写入任何通道。
+    /// source/target 为空、通道为空、任一端已 Release 或位于不同 topology 时返回失效句柄。
+    /// source 若为 IRuntimeObjectPointer，仅在建立调用时解引用其当前绑定目标。
+    /// 句柄析构或 Cancel()、任一端 Release 或析构时都会解除订阅关系。
+    virtual RuntimeSubscription SubscribeChannel(IRuntimeObject* source, DataChannelView channel) = 0;
+    /// 当前对象是 target，sourceChannel 与 targetChannel 可不同；建立订阅时不读取、写入或执行初始同步。
+    /// target 为空、source 或 target 通道为空、任一端无效、已 Release 或位于不同 topology 时返回失效句柄。
+    /// source 若为 IRuntimeObjectPointer，仅在建立调用时解引用其当前绑定目标。
+    /// 返回的 RuntimeSubscription 可通过析构或 Cancel() 解除订阅；任一端 Release 或析构时也会自动解除。
+    virtual RuntimeSubscription SubscribeChannel(IRuntimeObject* source, DataChannelView sourceChannel,
+                                                 DataChannelView targetChannel) = 0;
     /// 发布内置或业务自定义事件；空字符串不会投递，data 可为 nullptr。
     /// destroyDataAfterPublish 为 false 时仅借用 data，调用方继续负责其 delete。
     /// 为 true 时本次调用立即接管 data 的独占删除责任；完整同步派发结束、
@@ -209,5 +222,12 @@ protected:
     virtual void* QueryType(std::type_index type) noexcept = 0;
     virtual const void* QueryType(std::type_index type) const noexcept = 0;
 };
+
+/// 建立 source 到 target 的通道订阅，sourceChannel 与 targetChannel 可不同；建立时不读取、写入或执行初始同步。
+/// 通道为空、端点为空、无效、已 Release 或位于不同 topology 时返回失效句柄。
+/// source 或 target 若为 IRuntimeObjectPointer，仅在建立调用时解引用其当前绑定目标。
+/// 返回的 RuntimeSubscription 可通过析构或 Cancel() 解除订阅；任一端 Release 或析构时也会自动解除。
+RuntimeSubscription SubscribeChannel(IRuntimeObject* source, DataChannelView sourceChannel,
+                                     IRuntimeObject* target, DataChannelView targetChannel);
 
 } // namespace iobject

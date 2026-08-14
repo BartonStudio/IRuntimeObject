@@ -37,3 +37,6 @@ lib/
 # Testing
 Testing/
 CTestTestfile.cmake
+
+# kimi
+superkimi-master/

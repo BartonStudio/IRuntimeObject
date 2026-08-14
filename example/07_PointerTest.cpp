@@ -33,7 +33,6 @@ void PrintCounter(const iobject::IRuntimeObject* object, const char* title) {
 } // namespace
 
 int main() {
-    using iobject::EventHandlerId;
     using iobject::IRuntimeObject;
     using iobject::IRuntimeObjectPointer;
     using iobject::Runtime;
@@ -68,11 +67,11 @@ int main() {
               << (parent->GetChildItem("current") == first) << '\n';
 
     std::cout << "\n=== 3. 订阅与换绑均只作用于调用当次 ===\n";
-    EventHandlerId handlerId = observer->AddEventHandler("Changed", [first](const RuntimeObjectEvent& event) {
-        std::cout << "  observer 收到 " << event.type
-                  << "，source 是否为 first：" << (event.source == first) << '\n';
-    });
-    RuntimeSubscription subscription = observer->Observe(pointer, "Changed");
+    RuntimeSubscription subscription = observer->SubscribeEvent(
+        pointer, "Changed", [first](const RuntimeObjectEvent& event) {
+            std::cout << "  observer 收到 " << event.type
+                      << "，source 是否为 first：" << (event.source == first) << '\n';
+        });
     std::cout << "  以 pointer 作为 source 建立订阅：" << subscription.IsActive() << '\n';
     first->Publish("Changed");
     std::cout << "  换绑 second：" << pointer->Bind(second) << '\n';
@@ -88,7 +87,6 @@ int main() {
               << pointer->As<IRuntimeObjectPointer>() << '\n';
     PrintCounter(first, "first 仍可正常使用");
 
-    observer->RemoveEventHandler(handlerId);
     subscription.Cancel();
     delete pointer;
     delete observer;

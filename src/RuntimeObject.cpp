@@ -1,6 +1,7 @@
 #include <iobject/Runtime.hpp>
 
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <set>
@@ -98,6 +99,69 @@ private:
     bool entered_ = false;
 };
 
+struct ChannelSynchronizationContext {
+    std::vector<const RuntimeObject*> activePath;
+};
+
+thread_local ChannelSynchronizationContext* currentChannelSynchronizationContext = nullptr;
+
+class ChannelSynchronizationRootScope final {
+public:
+    ChannelSynchronizationRootScope(const RuntimeObjectEvent& event, const RuntimeObject* source)
+        : previousContext_(currentChannelSynchronizationContext) {
+        if (previousContext_ != nullptr || event.type != RuntimeEventTypes::DataChannelChanged
+            || event.data == nullptr || event.data->As<DataChannelChangedEventData>() == nullptr) {
+            return;
+        }
+
+        ownedContext_ = std::make_unique<ChannelSynchronizationContext>();
+        ownedContext_->activePath.push_back(source);
+        currentChannelSynchronizationContext = ownedContext_.get();
+    }
+
+    ~ChannelSynchronizationRootScope() {
+        if (ownedContext_) {
+            currentChannelSynchronizationContext = previousContext_;
+        }
+    }
+
+private:
+    ChannelSynchronizationContext* previousContext_ = nullptr;
+    std::unique_ptr<ChannelSynchronizationContext> ownedContext_;
+};
+
+class ChannelSynchronizationBranchScope final {
+public:
+    explicit ChannelSynchronizationBranchScope(const RuntimeObject* target)
+        : context_(currentChannelSynchronizationContext) {
+        if (context_ == nullptr) {
+            return;
+        }
+        for (const RuntimeObject* active : context_->activePath) {
+            if (active == target) {
+                std::cerr << "[IObject] 数据通道同步截断：检测到重复节点\n";
+                return;
+            }
+        }
+        context_->activePath.push_back(target);
+        entered_ = true;
+    }
+
+    ~ChannelSynchronizationBranchScope() {
+        if (entered_) {
+            context_->activePath.pop_back();
+        }
+    }
+
+    bool entered() const noexcept {
+        return entered_;
+    }
+
+private:
+    ChannelSynchronizationContext* context_ = nullptr;
+    bool entered_ = false;
+};
+
 struct TopologyEdge {
     RuntimeObject* parent = nullptr;
     std::string name;
@@ -113,6 +177,36 @@ struct EventSubscription {
     RuntimeObject* subscriber = nullptr;
     RuntimeObject* source = nullptr;
     RuntimeEventType type;
+    EventHandler handler;
+};
+
+struct ChannelSubscription {
+    RuntimeObject* source = nullptr;
+    DataChannel sourceChannel;
+    RuntimeObject* target = nullptr;
+    DataChannel targetChannel;
+};
+
+using ChannelSubscriptionSourceKey = std::pair<RuntimeObject*, DataChannel>;
+
+struct ChannelSubscriptionSourceLess {
+    using is_transparent = void;
+
+    bool operator()(const ChannelSubscriptionSourceKey& left,
+                    const ChannelSubscriptionSourceKey& right) const {
+        if (left.first != right.first) {
+            return std::less<RuntimeObject*>{}(left.first, right.first);
+        }
+        return left.second < right.second;
+    }
+
+    bool operator()(const ChannelSubscriptionSourceKey& left, RuntimeObject* right) const noexcept {
+        return std::less<RuntimeObject*>{}(left.first, right);
+    }
+
+    bool operator()(RuntimeObject* left, const ChannelSubscriptionSourceKey& right) const noexcept {
+        return std::less<RuntimeObject*>{}(left, right.first);
+    }
 };
 
 class RuntimeTopology {
@@ -123,7 +217,10 @@ public:
     RuntimeChildList getChildren(const RuntimeObject* parent) const;
     DetachedTopology detachTopology(RuntimeObject* object);
 
-    RuntimeSubscription observe(RuntimeObject* subscriber, IRuntimeObject* source, RuntimeEventTypeView type);
+    RuntimeSubscription addEventHandler(RuntimeObject* subscriber, IRuntimeObject* source,
+                                         RuntimeEventTypeView type, EventHandler handler);
+    RuntimeSubscription subscribeChannel(IRuntimeObject* source, DataChannelView sourceChannel,
+                                         IRuntimeObject* target, DataChannelView targetChannel);
     void cancelSubscription(std::size_t id) noexcept;
     bool isSubscriptionActive(std::size_t id) const noexcept;
     void publish(RuntimeObject* source, const RuntimeObjectEvent& event);
@@ -135,9 +232,13 @@ private:
     friend class RuntimeObject;
 
     bool wouldCreateCycle(const RuntimeObject* parent, IRuntimeObject* child) const;
+    std::size_t allocateSubscriptionId() noexcept;
+    void synchronizeChannels(RuntimeObject* source, const RuntimeObjectEvent& event);
     void rebuildIncoming();
     void removeSubscription(std::size_t id) noexcept;
+    void removeChannelSubscription(std::size_t id) noexcept;
     void removeSubscriptionsFor(RuntimeObject* object) noexcept;
+    void removeChannelSubscriptionsFor(RuntimeObject* object) noexcept;
 
     std::map<RuntimeObject*, std::map<std::string, IRuntimeObject*>> childrenByParent_;
     std::map<IRuntimeObject*, std::vector<TopologyEdge>> parentsByChild_;
@@ -145,6 +246,10 @@ private:
     std::map<std::size_t, EventSubscription> subscriptionsById_;
     std::map<RuntimeObject*, std::set<std::size_t>> subscriptionsBySubscriber_;
     std::map<std::pair<RuntimeObject*, RuntimeEventType>, std::set<std::size_t>> subscriptionsBySource_;
+    std::map<std::size_t, ChannelSubscription> channelSubscriptionsById_;
+    std::map<ChannelSubscriptionSourceKey, std::set<std::size_t>, ChannelSubscriptionSourceLess>
+        channelSubscriptionsBySource_;
+    std::map<RuntimeObject*, std::set<std::size_t>> channelSubscriptionsByTarget_;
     std::map<RuntimeObject*, std::set<RuntimeObjectPointer*>> pointersByTarget_;
 };
 
@@ -152,48 +257,6 @@ RuntimeTopology* runtimeTopology() {
     static RuntimeTopology* const topology = new RuntimeTopology();
     return topology;
 }
-
-class RuntimeEventDispatcher final {
-public:
-    EventHandlerId Add(RuntimeEventTypeView type, EventHandler handler) {
-        if (type.empty() || !handler) {
-            return 0;
-        }
-        const EventHandlerId id = nextHandlerId_++;
-        handlers_.emplace(id, HandlerEntry{RuntimeEventType(type), std::move(handler)});
-        return id;
-    }
-
-    bool Remove(EventHandlerId id) {
-        return id != 0 && handlers_.erase(id) != 0;
-    }
-
-    void Deliver(const RuntimeObjectEvent& event) {
-        std::vector<EventHandler> handlers;
-        for (const auto& [id, entry] : handlers_) {
-            static_cast<void>(id);
-            if (entry.type == event.type) {
-                handlers.push_back(entry.handler);
-            }
-        }
-        for (const EventHandler& handler : handlers) {
-            handler(event);
-        }
-    }
-
-    void Clear() noexcept {
-        handlers_.clear();
-    }
-
-private:
-    struct HandlerEntry {
-        RuntimeEventType type;
-        EventHandler handler;
-    };
-
-    EventHandlerId nextHandlerId_ = 1;
-    std::map<EventHandlerId, HandlerEntry> handlers_;
-};
 
 class RuntimeObject final : public IRuntimeObject {
     friend class RuntimeObjectPointer;
@@ -206,20 +269,22 @@ public:
         releaseInternal();
     }
 
-    EventHandlerId AddEventHandler(RuntimeEventTypeView type, EventHandler handler) override {
-        return state_ == RuntimeObjectState::Active
-            ? eventDispatcher_.Add(type, std::move(handler))
-            : 0;
-    }
-
-    bool RemoveEventHandler(EventHandlerId id) override {
-        return state_ == RuntimeObjectState::Active && eventDispatcher_.Remove(id);
-    }
-
-    RuntimeSubscription Observe(IRuntimeObject* source, RuntimeEventTypeView type) override {
+    RuntimeSubscription SubscribeEvent(IRuntimeObject* source, RuntimeEventTypeView type,
+                                       EventHandler handler) override {
         source = resolveRuntimeObject(source);
         return state_ == RuntimeObjectState::Active
-            ? topology_->observe(this, source, type)
+            ? topology_->addEventHandler(this, source, type, std::move(handler))
+            : RuntimeSubscription();
+    }
+
+    RuntimeSubscription SubscribeChannel(IRuntimeObject* source, DataChannelView channel) override {
+        return SubscribeChannel(source, channel, channel);
+    }
+
+    RuntimeSubscription SubscribeChannel(IRuntimeObject* source, DataChannelView sourceChannel,
+                                         DataChannelView targetChannel) override {
+        return state_ == RuntimeObjectState::Active
+            ? topology_->subscribeChannel(source, sourceChannel, this, targetChannel)
             : RuntimeSubscription();
     }
 
@@ -384,19 +449,13 @@ public:
         return topology_;
     }
 
-    void deliverEvent(const RuntimeObjectEvent& event) {
-        if (state_ == RuntimeObjectState::Active) {
-            eventDispatcher_.Deliver(event);
-        }
-    }
-
 private:
     void publishEvent(const RuntimeObjectEvent& event) {
         EventDispatchScope dispatchScope(event);
         if (!dispatchScope.entered()) {
             return;
         }
-        eventDispatcher_.Deliver(event);
+        ChannelSynchronizationRootScope synchronizationScope(event, this);
         topology_->publish(this, event);
     }
 
@@ -435,7 +494,6 @@ private:
         } catch (...) {
         }
         topology_->removeSubscriptionsFor(this);
-        eventDispatcher_.Clear();
         state_ = RuntimeObjectState::Released;
     }
 
@@ -446,7 +504,6 @@ private:
     std::function<bool(void*, DataChannelView, ByteInput)> writeData_;
     RuntimeTopology* topology_;
     RuntimeObjectState state_ = RuntimeObjectState::Active;
-    RuntimeEventDispatcher eventDispatcher_;
 };
 
 class RuntimeObjectPointer final : public IRuntimeObjectPointer {
@@ -483,9 +540,19 @@ public:
     const IRuntimeObject* GetBindObject() const noexcept override { return target_ && target_->isActive() ? target_ : nullptr; }
     bool IsBound() const noexcept override { return GetBindObject() != nullptr; }
 
-    EventHandlerId AddEventHandler(RuntimeEventTypeView t, EventHandler h) override { return target_ ? target_->AddEventHandler(t, std::move(h)) : 0; }
-    bool RemoveEventHandler(EventHandlerId id) override { return target_ ? target_->RemoveEventHandler(id) : false; }
-    RuntimeSubscription Observe(IRuntimeObject* source, RuntimeEventTypeView t) override { return target_ ? target_->Observe(source, t) : RuntimeSubscription(); }
+    RuntimeSubscription SubscribeEvent(IRuntimeObject* source, RuntimeEventTypeView type,
+                                       EventHandler handler) override {
+        return target_ ? target_->SubscribeEvent(source, type, std::move(handler))
+                       : RuntimeSubscription();
+    }
+    RuntimeSubscription SubscribeChannel(IRuntimeObject* source, DataChannelView channel) override {
+        return target_ ? target_->SubscribeChannel(source, channel) : RuntimeSubscription();
+    }
+    RuntimeSubscription SubscribeChannel(IRuntimeObject* source, DataChannelView sourceChannel,
+                                         DataChannelView targetChannel) override {
+        return target_ ? target_->SubscribeChannel(source, sourceChannel, targetChannel)
+                       : RuntimeSubscription();
+    }
     void Publish(RuntimeEventTypeView t, IRuntimeObject* data, bool destroy) override { if (target_) target_->Publish(t, data, destroy); else if (destroy) delete data; }
     void Release() noexcept override { Unbind(); released_ = true; }
     bool ReadData(DataChannelView c, DataReceiver r) const override { return target_ ? target_->ReadData(c, std::move(r)) : false; }
@@ -643,43 +710,205 @@ DetachedTopology RuntimeTopology::detachTopology(RuntimeObject* object) {
     return detached;
 }
 
-RuntimeSubscription RuntimeTopology::observe(RuntimeObject* subscriber, IRuntimeObject* source,
-                                             RuntimeEventTypeView type) {
+std::size_t RuntimeTopology::allocateSubscriptionId() noexcept {
+    std::size_t candidate = nextSubscriptionId_;
+    if (candidate == 0) {
+        candidate = 1;
+    }
+    const std::size_t firstCandidate = candidate;
+    do {
+        nextSubscriptionId_ = candidate == std::numeric_limits<std::size_t>::max()
+            ? 1
+            : candidate + 1;
+        if (subscriptionsById_.find(candidate) == subscriptionsById_.end()
+            && channelSubscriptionsById_.find(candidate) == channelSubscriptionsById_.end()) {
+            return candidate;
+        }
+        candidate = nextSubscriptionId_;
+    } while (candidate != firstCandidate);
+    return 0;
+}
+
+RuntimeSubscription RuntimeTopology::addEventHandler(RuntimeObject* subscriber,
+                                                     IRuntimeObject* source,
+                                                     RuntimeEventTypeView type,
+                                                     EventHandler handler) {
     RuntimeObject* runtimeSource = dynamic_cast<RuntimeObject*>(source);
-    if (type.empty() || subscriber == nullptr || runtimeSource == nullptr || !subscriber->isActive()
-        || !runtimeSource->isActive() || subscriber->topology() != this
-        || runtimeSource->topology() != this) {
+    if (type.empty() || !handler || subscriber == nullptr || runtimeSource == nullptr
+        || !subscriber->isActive() || !runtimeSource->isActive()
+        || subscriber->topology() != this || runtimeSource->topology() != this) {
         return RuntimeSubscription();
     }
 
     const RuntimeEventType eventType(type);
-    const std::size_t id = nextSubscriptionId_++;
-    subscriptionsById_.emplace(id, EventSubscription{subscriber, runtimeSource, eventType});
-    subscriptionsBySubscriber_[subscriber].insert(id);
-    subscriptionsBySource_[{runtimeSource, eventType}].insert(id);
-    return detail::createRuntimeSubscription(this, id);
+    while (true) {
+        const std::size_t id = allocateSubscriptionId();
+        if (id == 0) {
+            return RuntimeSubscription();
+        }
+        const auto result = subscriptionsById_.emplace(
+            id, EventSubscription{subscriber, runtimeSource, eventType, handler});
+        if (!result.second) {
+            continue;
+        }
+        subscriptionsBySubscriber_[subscriber].insert(id);
+        subscriptionsBySource_[{runtimeSource, eventType}].insert(id);
+        return detail::createRuntimeSubscription(this, id);
+    }
+}
+
+RuntimeSubscription RuntimeTopology::subscribeChannel(IRuntimeObject* source,
+                                                       DataChannelView sourceChannel,
+                                                       IRuntimeObject* target,
+                                                       DataChannelView targetChannel) {
+    source = resolveRuntimeObject(source);
+    target = resolveRuntimeObject(target);
+    RuntimeObject* runtimeSource = dynamic_cast<RuntimeObject*>(source);
+    RuntimeObject* runtimeTarget = dynamic_cast<RuntimeObject*>(target);
+    if (sourceChannel.empty() || targetChannel.empty() || runtimeSource == nullptr || runtimeTarget == nullptr
+        || !runtimeSource->isActive() || !runtimeTarget->isActive()
+        || runtimeSource->topology() != this || runtimeTarget->topology() != this) {
+        return RuntimeSubscription();
+    }
+
+    const DataChannel storedSourceChannel(sourceChannel);
+    const DataChannel storedTargetChannel(targetChannel);
+    while (true) {
+        const std::size_t id = allocateSubscriptionId();
+        if (id == 0) {
+            return RuntimeSubscription();
+        }
+
+        bool insertedById = false;
+        bool createdSourceIndex = false;
+        bool insertedBySource = false;
+        bool createdTargetIndex = false;
+        bool insertedByTarget = false;
+        auto sourceFound = channelSubscriptionsBySource_.end();
+        auto targetFound = channelSubscriptionsByTarget_.end();
+        try {
+            const auto idResult = channelSubscriptionsById_.emplace(
+                id, ChannelSubscription{runtimeSource, storedSourceChannel, runtimeTarget, storedTargetChannel});
+            if (!idResult.second) {
+                continue;
+            }
+            insertedById = true;
+            const auto sourceResult = channelSubscriptionsBySource_.try_emplace(
+                std::make_pair(runtimeSource, storedSourceChannel));
+            sourceFound = sourceResult.first;
+            createdSourceIndex = sourceResult.second;
+            sourceFound->second.insert(id);
+            insertedBySource = true;
+            const auto targetResult = channelSubscriptionsByTarget_.try_emplace(runtimeTarget);
+            targetFound = targetResult.first;
+            createdTargetIndex = targetResult.second;
+            targetFound->second.insert(id);
+            insertedByTarget = true;
+        } catch (...) {
+            if (targetFound != channelSubscriptionsByTarget_.end()) {
+                if (insertedByTarget) {
+                    targetFound->second.erase(id);
+                }
+                if (createdTargetIndex && targetFound->second.empty()) {
+                    channelSubscriptionsByTarget_.erase(targetFound);
+                }
+            }
+            if (sourceFound != channelSubscriptionsBySource_.end()) {
+                if (insertedBySource) {
+                    sourceFound->second.erase(id);
+                }
+                if (createdSourceIndex && sourceFound->second.empty()) {
+                    channelSubscriptionsBySource_.erase(sourceFound);
+                }
+            }
+            if (insertedById) {
+                channelSubscriptionsById_.erase(id);
+            }
+            throw;
+        }
+        return detail::createRuntimeSubscription(this, id);
+    }
 }
 
 void RuntimeTopology::cancelSubscription(std::size_t id) noexcept {
     removeSubscription(id);
+    removeChannelSubscription(id);
 }
 
 bool RuntimeTopology::isSubscriptionActive(std::size_t id) const noexcept {
-    return id != 0 && subscriptionsById_.find(id) != subscriptionsById_.end();
+    return id != 0 && (subscriptionsById_.find(id) != subscriptionsById_.end()
+                       || channelSubscriptionsById_.find(id) != channelSubscriptionsById_.end());
 }
 
 void RuntimeTopology::publish(RuntimeObject* source, const RuntimeObjectEvent& event) {
     const auto sourceFound = subscriptionsBySource_.find({source, event.type});
-    if (sourceFound == subscriptionsBySource_.end()) {
+    if (sourceFound != subscriptionsBySource_.end()) {
+        const std::vector<std::size_t> ids(sourceFound->second.begin(), sourceFound->second.end());
+        for (const std::size_t id : ids) {
+            const auto subscriptionFound = subscriptionsById_.find(id);
+            if (subscriptionFound != subscriptionsById_.end()
+                && subscriptionFound->second.subscriber != nullptr
+                && subscriptionFound->second.subscriber->isActive()) {
+                const EventHandler handler = subscriptionFound->second.handler;
+                handler(event);
+            }
+        }
+    }
+    synchronizeChannels(source, event);
+}
+
+void RuntimeTopology::synchronizeChannels(RuntimeObject* source, const RuntimeObjectEvent& event) {
+    if (source == nullptr || event.type != RuntimeEventTypes::DataChannelChanged || event.data == nullptr) {
+        return;
+    }
+    const DataChannelChangedEventData* changed = event.data->As<DataChannelChangedEventData>();
+    if (changed == nullptr) {
+        return;
+    }
+
+    const auto sourceFound = channelSubscriptionsBySource_.find({source, changed->channel});
+    if (sourceFound == channelSubscriptionsBySource_.end()) {
         return;
     }
 
     const std::vector<std::size_t> ids(sourceFound->second.begin(), sourceFound->second.end());
     for (const std::size_t id : ids) {
-        const auto subscriptionFound = subscriptionsById_.find(id);
-        if (subscriptionFound != subscriptionsById_.end()) {
-            subscriptionFound->second.subscriber->deliverEvent(event);
+        const auto subscriptionFound = channelSubscriptionsById_.find(id);
+        if (subscriptionFound == channelSubscriptionsById_.end()) {
+            continue;
         }
+        const ChannelSubscription subscription = subscriptionFound->second;
+        if (subscription.source != source || !source->isActive() || !subscription.target->isActive()
+            || source->topology() != this || subscription.target->topology() != this) {
+            continue;
+        }
+
+        ChannelSynchronizationBranchScope branchScope(subscription.target);
+        if (!branchScope.entered()) {
+            continue;
+        }
+
+        std::size_t receiverCalls = 0;
+        bool writeSucceeded = false;
+        const bool readSucceeded = source->ReadData(
+            subscription.sourceChannel,
+            [&subscription, &receiverCalls, &writeSucceeded, source](ByteView bytes) {
+                ++receiverCalls;
+                if (receiverCalls == 1 && subscription.target->isActive()
+                    && subscription.target->topology() == source->topology()) {
+                    writeSucceeded = subscription.target->WriteData(subscription.targetChannel, bytes);
+                }
+            });
+        if (!readSucceeded || receiverCalls != 1 || !writeSucceeded || !source->isActive()
+            || !subscription.target->isActive() || source->topology() != this
+            || subscription.target->topology() != this) {
+            continue;
+        }
+
+        std::unique_ptr<IRuntimeObject> payload(
+            Runtime::make<DataChannelChangedEventData>(subscription.targetChannel));
+        subscription.target->Publish(
+            RuntimeEventTypes::DataChannelChanged, payload.release(), true);
     }
 }
 
@@ -698,38 +927,119 @@ void RuntimeTopology::removeSubscription(std::size_t id) noexcept {
         return;
     }
 
-    const EventSubscription subscription = found->second;
-    subscriptionsById_.erase(found);
-    const auto subscriberFound = subscriptionsBySubscriber_.find(subscription.subscriber);
+    RuntimeObject* const subscriber = found->second.subscriber;
+    RuntimeObject* const source = found->second.source;
+    const RuntimeEventType& type = found->second.type;
+    const auto subscriberFound = subscriptionsBySubscriber_.find(subscriber);
     if (subscriberFound != subscriptionsBySubscriber_.end()) {
         subscriberFound->second.erase(id);
         if (subscriberFound->second.empty()) {
             subscriptionsBySubscriber_.erase(subscriberFound);
         }
     }
-    const std::pair<RuntimeObject*, RuntimeEventType> sourceKey = {subscription.source, subscription.type};
-    const auto sourceFound = subscriptionsBySource_.find(sourceKey);
+    auto sourceFound = subscriptionsBySource_.end();
+    for (auto current = subscriptionsBySource_.begin(); current != subscriptionsBySource_.end(); ++current) {
+        if (current->first.first == source && current->first.second == type) {
+            sourceFound = current;
+            break;
+        }
+    }
     if (sourceFound != subscriptionsBySource_.end()) {
         sourceFound->second.erase(id);
         if (sourceFound->second.empty()) {
             subscriptionsBySource_.erase(sourceFound);
         }
     }
+    subscriptionsById_.erase(found);
+}
+
+void RuntimeTopology::removeChannelSubscription(std::size_t id) noexcept {
+    const auto subscriptionFound = channelSubscriptionsById_.find(id);
+    if (subscriptionFound == channelSubscriptionsById_.end()) {
+        return;
+    }
+
+    RuntimeObject* const source = subscriptionFound->second.source;
+    RuntimeObject* const target = subscriptionFound->second.target;
+    auto sourceFound = channelSubscriptionsBySource_.lower_bound(source);
+    while (sourceFound != channelSubscriptionsBySource_.end() && sourceFound->first.first == source) {
+        if (sourceFound->second.erase(id) != 0) {
+            if (sourceFound->second.empty()) {
+                channelSubscriptionsBySource_.erase(sourceFound);
+            }
+            break;
+        }
+        ++sourceFound;
+    }
+    const auto targetFound = channelSubscriptionsByTarget_.find(target);
+    if (targetFound != channelSubscriptionsByTarget_.end()) {
+        targetFound->second.erase(id);
+        if (targetFound->second.empty()) {
+            channelSubscriptionsByTarget_.erase(targetFound);
+        }
+    }
+    channelSubscriptionsById_.erase(subscriptionFound);
 }
 
 void RuntimeTopology::removeSubscriptionsFor(RuntimeObject* object) noexcept {
-    std::set<std::size_t> ids;
-    const auto subscriberFound = subscriptionsBySubscriber_.find(object);
-    if (subscriberFound != subscriptionsBySubscriber_.end()) {
-        ids.insert(subscriberFound->second.begin(), subscriberFound->second.end());
-    }
-    for (const auto& [sourceKey, sourceIds] : subscriptionsBySource_) {
-        if (sourceKey.first == object) {
-            ids.insert(sourceIds.begin(), sourceIds.end());
+    while (true) {
+        std::size_t id = 0;
+        {
+            const auto subscriberFound = subscriptionsBySubscriber_.find(object);
+            if (subscriberFound != subscriptionsBySubscriber_.end() && !subscriberFound->second.empty()) {
+                id = *subscriberFound->second.begin();
+            }
         }
-    }
-    for (const std::size_t id : ids) {
+        if (id != 0) {
+            removeSubscription(id);
+            continue;
+        }
+
+        {
+            for (const auto& [sourceKey, sourceIds] : subscriptionsBySource_) {
+                if (sourceKey.first == object && !sourceIds.empty()) {
+                    id = *sourceIds.begin();
+                    break;
+                }
+            }
+        }
+        if (id == 0) {
+            break;
+        }
         removeSubscription(id);
+    }
+    removeChannelSubscriptionsFor(object);
+}
+
+void RuntimeTopology::removeChannelSubscriptionsFor(RuntimeObject* object) noexcept {
+    while (true) {
+        std::size_t id = 0;
+        {
+            const auto targetFound = channelSubscriptionsByTarget_.find(object);
+            if (targetFound != channelSubscriptionsByTarget_.end() && !targetFound->second.empty()) {
+                id = *targetFound->second.begin();
+            }
+        }
+        if (id != 0) {
+            removeChannelSubscription(id);
+            continue;
+        }
+
+        {
+            auto sourceFound = channelSubscriptionsBySource_.lower_bound(object);
+            while (sourceFound != channelSubscriptionsBySource_.end()
+                   && sourceFound->first.first == object) {
+                if (!sourceFound->second.empty()) {
+                    id = *sourceFound->second.begin();
+                    break;
+                }
+                ++sourceFound;
+            }
+        }
+        if (id == 0) {
+            return;
+        }
+        removeChannelSubscription(id);
     }
 }
 
@@ -762,6 +1072,12 @@ IRuntimeObjectPointer* createRuntimeObjectPointer(IRuntimeObject* initialObject)
 }
 
 } // namespace detail
+
+RuntimeSubscription SubscribeChannel(IRuntimeObject* source, DataChannelView sourceChannel,
+                                     IRuntimeObject* target, DataChannelView targetChannel) {
+    return target ? target->SubscribeChannel(source, sourceChannel, targetChannel)
+                  : RuntimeSubscription();
+}
 
 IRuntimeObject* Runtime::make() {
     return detail::createRuntimeObject({});
