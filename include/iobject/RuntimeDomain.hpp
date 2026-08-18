@@ -25,7 +25,8 @@ public:
     RuntimeBridgeRoot& BridgeRoot() const noexcept;
 
 private:
-    IRuntimeObject* rootAnchor_ = nullptr;
+    // 声明顺序是正确性依赖：bridgeRoot_ 必须先于根锚点销毁，不得调换。
+    std::unique_ptr<IRuntimeObject> rootAnchor_;
     std::unique_ptr<RuntimeBridgeRoot> bridgeRoot_;
 };
 
