@@ -5,6 +5,8 @@ include(CMakePackageConfigHelpers)
 
 add_library(IObject STATIC
     src/RuntimeObject.cpp
+    src/RuntimeDomain.cpp
+    src/RuntimeBridge.cpp
 )
 add_library(IObject::IObject ALIAS IObject)
 
@@ -44,6 +46,8 @@ install(FILES
     include/iobject/IRuntimeObject.hpp
     include/iobject/IRuntimeObjectPointer.hpp
     include/iobject/Runtime.hpp
+    include/iobject/RuntimeDomain.hpp
+    include/iobject/RuntimeBridge.hpp
     DESTINATION include/iobject
 )
 install(EXPORT IObjectTargets
