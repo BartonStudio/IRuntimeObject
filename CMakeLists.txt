@@ -29,6 +29,12 @@ if(BUILD_EXAMPLES)
     add_subdirectory(example)
 endif()
 
+option(BUILD_TESTS "Build automated tests" ON)
+if(BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
+
 install(TARGETS IObject
     EXPORT IObjectTargets
     ARCHIVE DESTINATION lib
