@@ -49,6 +49,11 @@ public:
     void Close() noexcept;
     bool IsOpen() const noexcept;
 
+    /// 根锚点在会话内的句柄；会话打开期间有效，关闭后返回 0。
+    RemoteObjectHandle RootObject() const noexcept;
+    /// 句柄有效性查询：会话打开且句柄已登记时返回 true。
+    bool HasObject(RemoteObjectHandle handle) const noexcept;
+
 private:
     friend class RuntimeBridgeRoot;
     RuntimeSession(IRuntimeObject* rootAnchor, IRuntimeObject* relay);

@@ -22,3 +22,7 @@ add_executable(test_msgpack11_smoke MsgPack11SmokeTest.cpp)
 target_link_libraries(test_msgpack11_smoke PRIVATE IObject::IObject)
 target_include_directories(test_msgpack11_smoke PRIVATE ${CMAKE_SOURCE_DIR}/third_party/msgpack11)
 add_test(NAME msgpack11_smoke COMMAND test_msgpack11_smoke)
+
+add_executable(test_runtime_session_root RuntimeSessionRootTest.cpp)
+target_link_libraries(test_runtime_session_root PRIVATE IObject::IObject)
+add_test(NAME runtime_session_root COMMAND test_runtime_session_root)

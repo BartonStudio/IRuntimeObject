@@ -14,6 +14,7 @@ struct RuntimeSession::Impl {
     };
 
     IRuntimeObject* rootAnchor = nullptr;  // 非拥有，由 RuntimeDomain 持有。
+    RemoteObjectHandle rootHandle = 0;     // 构造时登记的根锚点句柄。
     IRuntimeObject* relay = nullptr;       // 拥有：会话的中继订阅节点。
     bool open = true;
     RemoteObjectHandle nextHandle = 1;
@@ -93,6 +94,7 @@ RuntimeSession::RuntimeSession(IRuntimeObject* rootAnchor, IRuntimeObject* relay
     : impl_(std::make_unique<Impl>()) {
     impl_->rootAnchor = rootAnchor;
     impl_->relay = relay;
+    impl_->rootHandle = impl_->registerObject(rootAnchor);
 }
 
 RuntimeSession::~RuntimeSession() {
@@ -165,6 +167,15 @@ void RuntimeSession::Close() noexcept {
 
 bool RuntimeSession::IsOpen() const noexcept {
     return impl_->open;
+}
+
+RemoteObjectHandle RuntimeSession::RootObject() const noexcept {
+    return impl_->open ? impl_->rootHandle : 0;
+}
+
+bool RuntimeSession::HasObject(RemoteObjectHandle handle) const noexcept {
+    return impl_->open
+        && impl_->objectsByHandle.find(handle) != impl_->objectsByHandle.end();
 }
 
 std::unique_ptr<RuntimeSession> RuntimeBridgeRoot::OpenSession() {
