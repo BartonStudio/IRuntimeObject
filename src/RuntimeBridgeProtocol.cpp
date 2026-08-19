@@ -128,6 +128,10 @@ struct RuntimeBridgePeer::Impl {
             handleReadData(id, request);
         } else if (op == "WriteData") {
             handleWriteData(id, request);
+        } else if (op == "SubscribeEvent") {
+            handleSubscribeEvent(id, request);
+        } else if (op == "CancelEvent") {
+            handleCancelEvent(id, request);
         } else if (op == "Close") {
             handleClose(id);
         } else {
@@ -206,6 +210,53 @@ struct RuntimeBridgePeer::Impl {
             sendMessage(errorResponse(id, "OperationFailed", "对象拒绝写入通道: " + channel));
             return;
         }
+        sendMessage(okResponse(id));
+    }
+
+    void handleSubscribeEvent(std::uint64_t id, const MsgPack& request) {
+        std::uint64_t addr = 0;
+        std::string type;
+        if (!asUint64(request["addr"], addr) || addr == 0
+            || !asString(request["type"], type) || type.empty()) {
+            sendMessage(errorResponse(id, "MalformedMessage", "缺少合法的 addr 或 type 字段"));
+            return;
+        }
+        if (!session->HasObject(addr)) {
+            sendMessage(errorResponse(id, "AddrInvalid", "addr 无效或已失效"));
+            return;
+        }
+
+        // 订阅 ID 在 SubscribeEvent 返回后才知道，回调经共享单元读取。
+        auto subscriptionCell = std::make_shared<std::uint64_t>(0);
+        const std::uint64_t subscription = session->SubscribeEvent(
+            addr, type,
+            [this, subscriptionCell](const RemoteEventMessage& message) {
+                sendMessage(MsgPack(MsgPack::object{
+                    {"event", MsgPack(message.type)},
+                    {"subscription", MsgPack(*subscriptionCell)},
+                    {"addr", MsgPack(message.source)},
+                    {"channel", MsgPack(message.channel)}}));
+            });
+        if (subscription == 0) {
+            sendMessage(errorResponse(id, "OperationFailed", "订阅失败"));
+            return;
+        }
+        *subscriptionCell = subscription;
+        subscriptions.insert(subscription);
+        sendMessage(okResponse(id, {{"subscription", MsgPack(subscription)}}));
+    }
+
+    void handleCancelEvent(std::uint64_t id, const MsgPack& request) {
+        std::uint64_t subscription = 0;
+        if (!asUint64(request["subscription"], subscription) || subscription == 0) {
+            sendMessage(errorResponse(id, "MalformedMessage", "缺少合法的 subscription 字段"));
+            return;
+        }
+        if (subscriptions.erase(subscription) == 0) {
+            sendMessage(errorResponse(id, "SubscriptionInvalid", "订阅无效或已取消"));
+            return;
+        }
+        session->CancelEvent(subscription);
         sendMessage(okResponse(id));
     }
 

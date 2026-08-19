@@ -41,3 +41,8 @@ add_executable(test_runtime_bridge_protocol_data RuntimeBridgeProtocolDataTest.c
 target_link_libraries(test_runtime_bridge_protocol_data PRIVATE IObject::IObject)
 target_include_directories(test_runtime_bridge_protocol_data PRIVATE ${CMAKE_SOURCE_DIR}/third_party/msgpack11)
 add_test(NAME runtime_bridge_protocol_data COMMAND test_runtime_bridge_protocol_data)
+
+add_executable(test_runtime_bridge_protocol_event RuntimeBridgeProtocolEventTest.cpp)
+target_link_libraries(test_runtime_bridge_protocol_event PRIVATE IObject::IObject)
+target_include_directories(test_runtime_bridge_protocol_event PRIVATE ${CMAKE_SOURCE_DIR}/third_party/msgpack11)
+add_test(NAME runtime_bridge_protocol_event COMMAND test_runtime_bridge_protocol_event)
