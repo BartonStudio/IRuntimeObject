@@ -4,13 +4,14 @@
 
 ## 1. 公开边界
 
-`IObject` 是 C++20 静态库。安装后有以下五个公共头：
+`IObject` 是 C++20 静态库。安装后有以下六个公共头：
 
 - `<iobject/IRuntimeObject.hpp>`：对象拓扑、结构事件、`As<T>()` 查询与只读数据通道契约；
 - `<iobject/IRuntimeObjectPointer.hpp>`：可换绑透明指针节点契约；
 - `<iobject/Runtime.hpp>`：创建节点、承载原生对象生命周期、`TypeBuilder<T>` 类型规则及可选原生数据读取适配的门面。
 - `<iobject/RuntimeDomain.hpp>`：运行时域契约，自动持有唯一根锚点与桥接入口；
 - `<iobject/RuntimeBridge.hpp>`：`RuntimeBridgeRoot` 与 `RuntimeSession` 远程桥接模型（不含传输与协议）。
+- `<iobject/RuntimeBridgeProtocol.hpp>`：MessagePack 协议适配器 `RuntimeBridgePeer`，把一个传输连接映射到一个 `RuntimeSession`（编解码使用 vendored 的 msgpack11，位于 `third_party/msgpack11/`）。
 
 `RuntimeObject` 是静态库 `src` 中的私有实现，不是公共类型，调用方不得包含或依赖它。`Runtime` 工厂以 `IRuntimeObject*` 返回节点；调用方负责对每个返回节点执行 `delete`。`Connect` 仅保存非拥有拓扑边，调用方管理节点生命周期。
 
@@ -205,7 +206,7 @@ find_package(IObject CONFIG REQUIRED)
 target_link_libraries(client PRIVATE IObject::IObject)
 ```
 
-安装内容仅包括静态库、上述五个头文件和 CMake package 配置。内部工厂桥接位于 `iobject::detail`，仅为模板门面链接静态库所需，调用方不应直接依赖。
+安装内容仅包括静态库、上述六个头文件和 CMake package 配置。内部工厂桥接位于 `iobject::detail`，仅为模板门面链接静态库所需，调用方不应直接依赖。
 
 ## 6. 当前拓扑实例与多域演进
 
@@ -215,7 +216,9 @@ target_link_libraries(client PRIVATE IObject::IObject)
 
 缓存 `topology_` 只消除了每次操作重新取得全局单例的间接访问，不能解决 `RuntimeTopology::rebuildIncoming()` 在每次拓扑变更时全图重建入边索引的性能问题；该问题需要独立的数据结构优化。
 
-`RuntimeDomain` 已实现第一版：它对应当前单一全局拓扑，构造时自动创建并持有纯运行时根锚点（`RootAnchor()`）与唯一 `RuntimeBridgeRoot`（`BridgeRoot()`）。根锚点在域及桥接服务存活期间不得 `Release` 或 `delete`（约定，不加运行时分支）。销毁顺序：先关闭全部 `RuntimeSession`，再销毁业务对象，最后销毁域。`RuntimeSession` 由 `RuntimeBridgeRoot::OpenSession()` 创建，方法逐一对应 JS 端接口（`ResolveRootChild`/`ResolveChild` ↔ `GetChildItem`，`ReadData`/`WriteData`，`SubscribeEvent`/`CancelEvent`，`Close`）；远程可见范围是从根锚点沿 `Connect` 向下可达的子树，远程不能 `Connect`/`Disconnect`/`Release`/`As<T>`。会话为每个被引用对象分配会话内不透明 `RemoteObjectHandle`（不暴露内存地址，跨会话独立），同一对象经多条路径到达返回同一句柄；对象 `Release` 或析构后句柄立即失效。会话经一个私有中继节点登记全部远程订阅（满足订阅者必须是 `IRuntimeObject` 的既有规则），事件消息第一版不传输通用载荷，仅在载荷可 `As<DataChannelChangedEventData>()` 时携带 `channel`。传输层与消息协议未实现，未来只需把协议消息转发到 `RuntimeSession` 方法。句柄失效只绑定对象 `Release`/析构；对象被 `Disconnect` 移出根锚点子树后，已持有句柄的远程端在对象 `Release` 前仍可访问它——可见范围约束发现，不约束已建立的访问。
+`RuntimeDomain` 已实现第一版：它对应当前单一全局拓扑，构造时自动创建并持有纯运行时根锚点（`RootAnchor()`）与唯一 `RuntimeBridgeRoot`（`BridgeRoot()`）。根锚点在域及桥接服务存活期间不得 `Release` 或 `delete`（约定，不加运行时分支）。销毁顺序：先关闭全部 `RuntimeSession`，再销毁业务对象，最后销毁域。`RuntimeSession` 由 `RuntimeBridgeRoot::OpenSession()` 创建，方法逐一对应 JS 端接口（`ResolveRootChild`/`ResolveChild` ↔ `GetChildItem`，`ReadData`/`WriteData`，`SubscribeEvent`/`CancelEvent`，`Close`）；远程可见范围是从根锚点沿 `Connect` 向下可达的子树，远程不能 `Connect`/`Disconnect`/`Release`/`As<T>`。会话为每个被引用对象分配会话内不透明 `RemoteObjectHandle`（不暴露内存地址，跨会话独立），同一对象经多条路径到达返回同一句柄；对象 `Release` 或析构后句柄立即失效。会话经一个私有中继节点登记全部远程订阅（满足订阅者必须是 `IRuntimeObject` 的既有规则），事件消息第一版不传输通用载荷，仅在载荷可 `As<DataChannelChangedEventData>()` 时携带 `channel`。传输层未实现；消息协议已由下述 `RuntimeBridgePeer` 适配器实现。句柄失效只绑定对象 `Release`/析构；对象被 `Disconnect` 移出根锚点子树后，已持有句柄的远程端在对象 `Release` 前仍可访问它——可见范围约束发现，不约束已建立的访问。
+
+协议适配器 `RuntimeBridgePeer` 已实现：传输层每收到一条完整 MessagePack 消息就调用 `ReceiveMessage`，适配器把请求翻译成 `RuntimeSession` 调用并经 `SendCallback` 发回响应帧与事件帧。协议操作集为 `Connect`（握手，返回根锚点 addr）、`GetChildItem`（childId 单层名称，响应回显）、`ReadData`/`WriteData`、`SubscribeEvent`/`CancelEvent`、`Close`；对象标识 `addr` 即 `RemoteObjectHandle`。错误以 `{ok:false, error:{code, message}}` 返回，错误码见协议规格 `docs/superpowers/specs/2026-08-18-runtime-bridge-messagepack-protocol-design.md`。MessagePack 编解码由 vendored 的 msgpack11 提供，真实传输层（WebSocket 等）仍未实现。
 
 ## 7. 当前边界与后续规划
 

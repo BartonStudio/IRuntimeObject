@@ -30,7 +30,7 @@ Runtime
 
 ## 多运行时域与跨域引用（未实现）
 
-`RuntimeDomain`、`RuntimeBridgeRoot` 与 `RuntimeSession` 的第一版已实现（仅 C++ 侧模型，单默认域，无传输与协议）：域自动持有根锚点，远程经会话句柄沿根锚点子树发现对象、读写通道并订阅事件。`RuntimeDomainManager`、`DomainId`、域内稳定对象 ID 索引与 `ExternalObjectRef` 仍未实现。
+`RuntimeDomain`、`RuntimeBridgeRoot` 与 `RuntimeSession` 的第一版已实现（仅 C++ 侧模型，单默认域）：域自动持有根锚点，远程经会话句柄沿根锚点子树发现对象、读写通道并订阅事件。MessagePack 协议适配器（`RuntimeBridgePeer`）已实现：定义了 Connect/GetChildItem/ReadData/WriteData/SubscribeEvent/CancelEvent/Close 操作与事件下行帧，编解码使用 vendored msgpack11；真实传输层与域名路由仍未实现。`RuntimeDomainManager`、`DomainId`、域内稳定对象 ID 索引与 `ExternalObjectRef` 仍未实现。
 
 当前所有节点共享单一全局 `RuntimeTopology`，没有域概念。未来需要引入以下能力，但不改变当前最小内核：
 

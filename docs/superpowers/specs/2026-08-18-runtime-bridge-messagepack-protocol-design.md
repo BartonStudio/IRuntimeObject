@@ -164,3 +164,12 @@ RuntimeSession（已实现）
 - 逐操作覆盖：握手成功（返回根 addr）/域不存在、从根 addr 逐级 `GetChildItem` 解析、未命中、读写成功与拒绝、订阅/取消、事件帧字段、Released 下行、关闭后会话终结；
 - 畸形消息：非 map、缺字段、类型错误、超长消息；
 - 2^53 约束只作文档承诺，不做运行时测试。
+
+## 10. 实现记录
+
+- 编解码库：msgpack11（`ar90n/msgpack11`，MIT），vendored 于 `third_party/msgpack11/`，随 IObject 静态库编译。
+- 重复 `Connect`（会话已建立后再次握手）返回 `OperationFailed`，规格第 4.1 节未覆盖此情形，以本节为准。
+- `childId` 为空或含 `.` 时返回 `MalformedMessage`（协议规定它是单层名称）。
+- 对象 `Release` 后被内核自动取消的订阅，之后 `CancelEvent` 返回 ok（幂等从简）；`SubscriptionInvalid` 只覆盖从未存在或已被显式取消的 ID。
+- 单条消息上限按建议值实现为 1 MiB，超过回 `MalformedMessage`（`id: 0`）并关闭连接。
+- 事件帧 `channel` 字段仅 `DataChannelChanged` 非空；通用载荷快照（载荷对象的 `ReadData` 约定）是后续候选方向，当前未实现。
