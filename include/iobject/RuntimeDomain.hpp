@@ -9,6 +9,8 @@ class RuntimeBridgeRoot;
 
 /// 运行时域：第一版对应进程内默认全局拓扑，自动创建并持有唯一根锚点与桥接入口。
 /// 一个活动 IRuntimeObject 同一时刻有且仅属于一个域，生命周期内不迁移。
+/// 第一版每个进程只应存在一个 RuntimeDomain 实例；多个实例会共享同一全局拓扑，
+/// 跨"域"关系不会被阻止。
 /// 硬约束（约定，不加运行时分支）：域及桥接服务存活期间，不得对根锚点 Release 或 delete。
 /// 正常销毁顺序：先关闭全部 RuntimeSession，再销毁业务对象，最后销毁 RuntimeDomain。
 class RuntimeDomain final {

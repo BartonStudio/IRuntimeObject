@@ -215,7 +215,7 @@ target_link_libraries(client PRIVATE IObject::IObject)
 
 缓存 `topology_` 只消除了每次操作重新取得全局单例的间接访问，不能解决 `RuntimeTopology::rebuildIncoming()` 在每次拓扑变更时全图重建入边索引的性能问题；该问题需要独立的数据结构优化。
 
-`RuntimeDomain` 已实现第一版：它对应当前单一全局拓扑，构造时自动创建并持有纯运行时根锚点（`RootAnchor()`）与唯一 `RuntimeBridgeRoot`（`BridgeRoot()`）。根锚点在域及桥接服务存活期间不得 `Release` 或 `delete`（约定，不加运行时分支）。销毁顺序：先关闭全部 `RuntimeSession`，再销毁业务对象，最后销毁域。`RuntimeSession` 由 `RuntimeBridgeRoot::OpenSession()` 创建，方法逐一对应 JS 端接口（`ResolveRootChild`/`ResolveChild` ↔ `GetChildItem`，`ReadData`/`WriteData`，`SubscribeEvent`/`CancelEvent`，`Close`）；远程可见范围是从根锚点沿 `Connect` 向下可达的子树，远程不能 `Connect`/`Disconnect`/`Release`/`As<T>`。会话为每个被引用对象分配会话内不透明 `RemoteObjectHandle`（不暴露内存地址，跨会话独立），同一对象经多条路径到达返回同一句柄；对象 `Release` 或析构后句柄立即失效。会话经一个私有中继节点登记全部远程订阅（满足订阅者必须是 `IRuntimeObject` 的既有规则），事件消息第一版不传输通用载荷，仅在载荷可 `As<DataChannelChangedEventData>()` 时携带 `channel`。传输层与消息协议未实现，未来只需把协议消息转发到 `RuntimeSession` 方法。
+`RuntimeDomain` 已实现第一版：它对应当前单一全局拓扑，构造时自动创建并持有纯运行时根锚点（`RootAnchor()`）与唯一 `RuntimeBridgeRoot`（`BridgeRoot()`）。根锚点在域及桥接服务存活期间不得 `Release` 或 `delete`（约定，不加运行时分支）。销毁顺序：先关闭全部 `RuntimeSession`，再销毁业务对象，最后销毁域。`RuntimeSession` 由 `RuntimeBridgeRoot::OpenSession()` 创建，方法逐一对应 JS 端接口（`ResolveRootChild`/`ResolveChild` ↔ `GetChildItem`，`ReadData`/`WriteData`，`SubscribeEvent`/`CancelEvent`，`Close`）；远程可见范围是从根锚点沿 `Connect` 向下可达的子树，远程不能 `Connect`/`Disconnect`/`Release`/`As<T>`。会话为每个被引用对象分配会话内不透明 `RemoteObjectHandle`（不暴露内存地址，跨会话独立），同一对象经多条路径到达返回同一句柄；对象 `Release` 或析构后句柄立即失效。会话经一个私有中继节点登记全部远程订阅（满足订阅者必须是 `IRuntimeObject` 的既有规则），事件消息第一版不传输通用载荷，仅在载荷可 `As<DataChannelChangedEventData>()` 时携带 `channel`。传输层与消息协议未实现，未来只需把协议消息转发到 `RuntimeSession` 方法。句柄失效只绑定对象 `Release`/析构；对象被 `Disconnect` 移出根锚点子树后，已持有句柄的远程端在对象 `Release` 前仍可访问它——可见范围约束发现，不约束已建立的访问。
 
 ## 7. 当前边界与后续规划
 
