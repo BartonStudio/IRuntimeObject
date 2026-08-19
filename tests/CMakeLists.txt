@@ -9,3 +9,7 @@ add_test(NAME runtime_domain COMMAND test_runtime_domain)
 add_executable(test_runtime_session_resolve RuntimeSessionResolveTest.cpp)
 target_link_libraries(test_runtime_session_resolve PRIVATE IObject::IObject)
 add_test(NAME runtime_session_resolve COMMAND test_runtime_session_resolve)
+
+add_executable(test_runtime_session_data RuntimeSessionDataTest.cpp)
+target_link_libraries(test_runtime_session_data PRIVATE IObject::IObject)
+add_test(NAME runtime_session_data COMMAND test_runtime_session_data)
