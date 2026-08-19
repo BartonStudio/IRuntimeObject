@@ -124,6 +124,10 @@ struct RuntimeBridgePeer::Impl {
             handleConnect(id, request);
         } else if (op == "GetChildItem") {
             handleGetChildItem(id, request);
+        } else if (op == "ReadData") {
+            handleReadData(id, request);
+        } else if (op == "WriteData") {
+            handleWriteData(id, request);
         } else if (op == "Close") {
             handleClose(id);
         } else {
@@ -153,6 +157,56 @@ struct RuntimeBridgePeer::Impl {
             return;
         }
         sendMessage(okResponse(id, {{"childId", MsgPack(childId)}, {"addr", MsgPack(child)}}));
+    }
+
+    void handleReadData(std::uint64_t id, const MsgPack& request) {
+        std::uint64_t addr = 0;
+        std::string channel;
+        if (!asUint64(request["addr"], addr) || addr == 0
+            || !asString(request["channel"], channel)) {
+            sendMessage(errorResponse(id, "MalformedMessage", "缺少合法的 addr 或 channel 字段"));
+            return;
+        }
+        if (!session->HasObject(addr)) {
+            sendMessage(errorResponse(id, "AddrInvalid", "addr 无效或已失效"));
+            return;
+        }
+        MsgPack::binary bytes;
+        const bool accepted = session->ReadData(addr, channel, [&bytes](ByteView view) {
+            bytes.assign(view.begin(), view.end());
+        });
+        if (!accepted) {
+            sendMessage(errorResponse(id, "OperationFailed", "对象拒绝读取通道: " + channel));
+            return;
+        }
+        sendMessage(okResponse(id, {{"data", MsgPack(std::move(bytes))}}));
+    }
+
+    void handleWriteData(std::uint64_t id, const MsgPack& request) {
+        std::uint64_t addr = 0;
+        std::string channel;
+        if (!asUint64(request["addr"], addr) || addr == 0
+            || !asString(request["channel"], channel)) {
+            sendMessage(errorResponse(id, "MalformedMessage", "缺少合法的 addr 或 channel 字段"));
+            return;
+        }
+        const MsgPack& data = request["data"];
+        if (!data.is_binary()) {
+            sendMessage(errorResponse(id, "MalformedMessage", "data 字段必须是二进制"));
+            return;
+        }
+        if (!session->HasObject(addr)) {
+            sendMessage(errorResponse(id, "AddrInvalid", "addr 无效或已失效"));
+            return;
+        }
+        const MsgPack::binary& bytes = data.binary_items();
+        const bool accepted = session->WriteData(
+            addr, channel, ByteView(bytes.data(), bytes.size()));
+        if (!accepted) {
+            sendMessage(errorResponse(id, "OperationFailed", "对象拒绝写入通道: " + channel));
+            return;
+        }
+        sendMessage(okResponse(id));
     }
 
     void handleConnect(std::uint64_t id, const MsgPack& request) {
