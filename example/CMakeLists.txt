@@ -24,3 +24,7 @@ target_link_libraries(test_08_subscribe_channel PRIVATE IObject::IObject)
 
 add_executable(test_09_remote_bridge 09_RemoteBridgeTest.cpp)
 target_link_libraries(test_09_remote_bridge PRIVATE IObject::IObject)
+
+add_executable(test_10_messagepack_protocol 10_MessagePackProtocolTest.cpp)
+target_link_libraries(test_10_messagepack_protocol PRIVATE IObject::IObject)
+target_include_directories(test_10_messagepack_protocol PRIVATE ${CMAKE_SOURCE_DIR}/third_party/msgpack11)
