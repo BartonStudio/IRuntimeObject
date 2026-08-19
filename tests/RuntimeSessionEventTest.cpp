@@ -81,7 +81,24 @@ int main() {
         handle, iobject::RuntimeEventTypes::DataChannelChanged,
         [&](const iobject::RemoteEventMessage&) { ++eventCount; });
     TEST_CHECK(again != 0);
+
+    // 远程端能收到 Released 通知：恰好一次，source 为对象句柄。
+    int releasedCount = 0;
+    iobject::RemoteObjectHandle releasedSource = 0;
+    iobject::RuntimeEventType releasedType;
+    const std::uint64_t releasedSub = session->SubscribeEvent(
+        handle, iobject::RuntimeEventTypes::Released,
+        [&](const iobject::RemoteEventMessage& message) {
+            ++releasedCount;
+            releasedSource = message.source;
+            releasedType = message.type;
+        });
+    TEST_CHECK(releasedSub != 0);
+
     node->Release();
+    TEST_CHECK(releasedCount == 1);
+    TEST_CHECK(releasedSource == handle);
+    TEST_CHECK(releasedType == iobject::RuntimeEventTypes::Released);
     TEST_CHECK(session->ResolveChild(handle, "Anything") == 0);
     TEST_CHECK(session->ReadData(handle, "Value", [](iobject::ByteView) {}) == false);
     counter->Increase();  // 节点已 Release，Publish 不再投递，也不应崩溃。

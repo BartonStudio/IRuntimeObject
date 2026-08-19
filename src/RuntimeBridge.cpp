@@ -66,13 +66,10 @@ struct RuntimeSession::Impl {
         objectsByHandle.erase(found->second);
         handlesByObject.erase(found);
         releaseWatchByObject.erase(object);  // 析构 RuntimeSubscription，幂等 Cancel。
-        for (auto current = eventSubscriptions.begin(); current != eventSubscriptions.end();) {
-            if (current->second.source == object) {
-                current = eventSubscriptions.erase(current);
-            } else {
-                ++current;
-            }
-        }
+        // 注意：此处不得抹除 eventSubscriptions 中该对象的订阅。
+        // 本回调运行在 Released 同步派发期间，提前抹除会让远程端收不到 Released；
+        // 内核在 Released 投递后会自动解除源侧订阅，残留条目变为不活跃，
+        // 由 CancelEvent/close 时清理，安全无害。
     }
 
     void close() noexcept {
