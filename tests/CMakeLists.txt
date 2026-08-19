@@ -26,3 +26,8 @@ add_test(NAME msgpack11_smoke COMMAND test_msgpack11_smoke)
 add_executable(test_runtime_session_root RuntimeSessionRootTest.cpp)
 target_link_libraries(test_runtime_session_root PRIVATE IObject::IObject)
 add_test(NAME runtime_session_root COMMAND test_runtime_session_root)
+
+add_executable(test_runtime_bridge_protocol_connect RuntimeBridgeProtocolConnectTest.cpp)
+target_link_libraries(test_runtime_bridge_protocol_connect PRIVATE IObject::IObject)
+target_include_directories(test_runtime_bridge_protocol_connect PRIVATE ${CMAKE_SOURCE_DIR}/third_party/msgpack11)
+add_test(NAME runtime_bridge_protocol_connect COMMAND test_runtime_bridge_protocol_connect)

@@ -7,6 +7,7 @@ add_library(IObject STATIC
     src/RuntimeObject.cpp
     src/RuntimeDomain.cpp
     src/RuntimeBridge.cpp
+    src/RuntimeBridgeProtocol.cpp
     third_party/msgpack11/msgpack11.cpp
 )
 add_library(IObject::IObject ALIAS IObject)
@@ -50,6 +51,7 @@ install(FILES
     include/iobject/Runtime.hpp
     include/iobject/RuntimeDomain.hpp
     include/iobject/RuntimeBridge.hpp
+    include/iobject/RuntimeBridgeProtocol.hpp
     DESTINATION include/iobject
 )
 install(EXPORT IObjectTargets
