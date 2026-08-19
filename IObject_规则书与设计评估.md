@@ -6,9 +6,9 @@
 
 `IObject` 是 C++20 静态库。安装后有以下六个公共头：
 
-- `<iobject/IRuntimeObject.hpp>`：对象拓扑、结构事件、`As<T>()` 查询与只读数据通道契约；
+- `<iobject/IRuntimeObject.hpp>`：对象拓扑、结构事件、`As<T>()` 查询与不透明数据通道读写契约；
 - `<iobject/IRuntimeObjectPointer.hpp>`：可换绑透明指针节点契约；
-- `<iobject/Runtime.hpp>`：创建节点、承载原生对象生命周期、`TypeBuilder<T>` 类型规则及可选原生数据读取适配的门面。
+- `<iobject/Runtime.hpp>`：创建节点、承载原生对象生命周期、`TypeBuilder<T>` 类型规则及可选原生数据读写适配的门面。
 - `<iobject/RuntimeDomain.hpp>`：运行时域契约，自动持有唯一根锚点与桥接入口；
 - `<iobject/RuntimeBridge.hpp>`：`RuntimeBridgeRoot` 与 `RuntimeSession` 远程桥接模型（不含传输与协议）。
 - `<iobject/RuntimeBridgeProtocol.hpp>`：MessagePack 协议适配器 `RuntimeBridgePeer`，把一个传输连接映射到一个 `RuntimeSession`（编解码使用 vendored 的 msgpack11，位于 `third_party/msgpack11/`）。
@@ -37,9 +37,9 @@
 
 - `Runtime::make()`：创建纯运行时节点，可作为对象拓扑的根节点；
 - `Runtime::make<T>(args...)`：创建并持有新建 `T`；
-- `Runtime::share(std::shared_ptr<T>)`：保留共享控制块；
+- `Runtime::share(std::shared_ptr<T>)`：保留共享控制块；传入空 `shared_ptr` 返回 `nullptr`；
 - `Runtime::ref(T&)`：仅借用对象，调用方负责原对象生命周期；
-- `Runtime::fromPtr(T*, owned)`：适配遗留裸指针；`owned` 为真时节点被 `delete` 时会 `delete` 指针；
+- `Runtime::fromPtr(T*, owned)`：适配遗留裸指针；`owned` 为真时节点被 `delete` 时会 `delete` 指针；传入 `nullptr` 返回 `nullptr`；
 - `Runtime::makePointer()`：创建未绑定的 `IRuntimeObjectPointer`；
 - `Runtime::makePointer(IRuntimeObject*)`：创建后立即尝试绑定目标；目标无效时仍返回未绑定指针节点。
 
@@ -65,7 +65,7 @@
 
 `IRuntimeObjectPointer` 是不拥有目标生命周期的可换绑节点。它通过 `Bind(IRuntimeObject*)` 绑定普通活动运行时节点，`Unbind()` 解除绑定，`GetBindObject()` 读取当前目标，`IsBound()` 查询状态；`Bind(nullptr)` 等同于 `Unbind()` 并成功。第一版拒绝绑定自身、另一指针节点、已 Release 的节点及不同运行时拓扑中的节点。
 
-已绑定指针在**调用当次**透明转发 `SubscribeEvent`、`Publish`、数据通道和拓扑查询/操作到目标；未绑定时返回对应失败或空结果，不缓存操作。指针不维护自己的处理器、订阅或拓扑边，换绑不会迁移或撤销先前经它建立在旧目标上的关系，调用方须自行管理 `RuntimeSubscription` 句柄。`Publish` 的 `data` 始终是事件载荷而非目标参数，不会被解引用。
+已绑定指针在**调用当次**透明转发 `SubscribeEvent`、`Publish`、数据通道和拓扑查询/操作到目标；未绑定时返回对应失败或空结果，不缓存操作。指针不维护自己的处理器、订阅或拓扑边，换绑不会迁移或撤销先前经它建立在旧目标上的关系，调用方须自行管理 `RuntimeSubscription` 句柄。`Publish` 的 `data` 始终是事件载荷而非目标参数，不会被解引用；未绑定指针收到 `Publish(type, data, true)` 时事件不转发，但仍按接管语义 `delete data`。
 
 `pointer->As<IRuntimeObjectPointer>()` 返回指针节点自身；其余 `pointer->As<T>()` 在已绑定时查询当前目标。普通节点将 pointer 用作 `Connect` 的 child 或 `SubscribeEvent` 的 source 参数时，也只在该次调用解引用当前目标：空指针节点失败，既有边与订阅不会随之后的 `Bind()` 改变。
 
@@ -183,7 +183,7 @@ delete root;
 - 父节点绝不 `delete` 子节点，调用方保有并管理节点；节点 `Release` 或析构时会自动解除全部相关拓扑边；
 - 会形成环的 `Connect` 是原子失败：不改变现有边，也不发送事件；
 - 默认 `overwrite == false`：重名连接返回 `false`，不改变关联且不发送事件；
-- `overwrite == true`：通过环检测后先完成拓扑替换，再同步依次发送同名的 `ChildDisconnected`、`ChildConnected`；覆盖不销毁旧子节点；
+- `overwrite == true`：通过环检测后先完成拓扑替换，再同步依次发送同名的 `ChildDisconnected`、`ChildConnected`；覆盖不销毁旧子节点。若同名旧 child 与新 child 是同一对象，则视为幂等成功：直接返回 `true`，不改变拓扑也不发送事件；
 - 新名称连接成功后，先记录拓扑边，再同步发送 `ChildConnected`；
 - `Disconnect` 只移除当前父节点的直接子边，且只接受非空、不含 `.` 的单层名称；`GetChildItem` 接受 `.` 分隔的相对向下路径并逐层查询，返回非拥有的 `IRuntimeObject*`；空路径、首尾点、连续点或任一层不存在时为 `nullptr`。当前不支持绝对路径、`.`、`..`、通配符或跨父查询，因为多父 DAG 不存在唯一父路径；
 - `Release()` 第一次调用会先解除所有入边与出边，再为每条入边由原父节点、为每条出边由当前节点同步发送 `ChildDisconnected`；随后在清理订阅前发送一次 `Released`，最后清理全部订阅与本地处理器。重复调用安全。释放后不能再 `Connect`、注册处理器、观察或发布事件，查询结果为空；
@@ -213,15 +213,15 @@ delete root;
 
 ### 5.2 会话与句柄
 
-- `RuntimeSession` 由 `RuntimeBridgeRoot::OpenSession()` 创建，方法对应远程端接口：`RootObject()`（根锚点句柄）、`ResolveChild`、`ReadData`/`WriteData`、`SubscribeEvent`/`CancelEvent`、`HasObject`、`Close`/`IsOpen`。
-- 会话为每个被引用对象分配会话内不透明 `RemoteObjectHandle`（协议中称 `addr`，不暴露内存地址，跨会话独立）；同一对象经多条路径到达返回同一句柄。对象 `Release` 或析构后句柄立即失效；会话关闭时全部句柄与订阅失效。
+- `RuntimeSession` 由 `RuntimeBridgeRoot::OpenSession()` 创建（根锚点不可用时返回 `nullptr`），方法对应远程端接口：`RootObject()`（根锚点句柄）、`ResolveRootChild`（对应 JS `runtime.Root.GetChildItem`）、`ResolveChild`、`ReadData`/`WriteData`、`SubscribeEvent`/`CancelEvent`、`HasObject`、`Close`/`IsOpen`。
+- 会话为每个被引用对象分配会话内不透明 `RemoteObjectHandle`（协议中称 `addr`，不暴露内存地址，跨会话独立）；同一对象经多条路径到达返回同一句柄。句柄 `0` 是无效哨兵值：解析未命中、无效句柄参数、会话关闭后的查询均返回 `0`。对象 `Release` 或析构后句柄立即失效；会话关闭时全部句柄与订阅失效。
 - 会话经一个私有中继节点登记全部远程订阅（满足订阅者必须是 `IRuntimeObject` 的既有规则）；对象 `Release` 时远程订阅者能收到 `Released` 通知。
 - 事件消息第一版不传输通用载荷，仅在载荷可 `As<DataChannelChangedEventData>()` 时携带 `channel`。
 
 ### 5.3 消息协议与适配器
 
 - `RuntimeBridgePeer` 把一个传输连接映射到一个 `RuntimeSession`：传输层每收到一条完整 MessagePack 消息就调用 `ReceiveMessage`，适配器把请求翻译成 `RuntimeSession` 调用，经 `SendCallback` 发回响应帧与事件帧；帧字节仅在 `SendCallback` 调用期间有效。真实传输层（WebSocket 等）未实现，接入时只需把收发接到这两个点。
-- 协议操作集：`Connect`（握手，校验域名，成功返回根锚点 `addr`，失败关闭连接）、`GetChildItem`（`childId` 为非空单层名称，响应回显 `childId` 并返回子对象 `addr`）、`ReadData`/`WriteData`（`data` 为 MessagePack bin）、`SubscribeEvent`/`CancelEvent`、`Close`（传输断开等价隐式 `Close`）。
+- 协议操作集：`Connect`、`GetChildItem`（`childId` 为非空单层名称，响应回显 `childId` 并返回子对象 `addr`）、`ReadData`/`WriteData`（`data` 为 MessagePack bin）、`SubscribeEvent`/`CancelEvent`、`Close`（传输断开等价隐式 `Close`）。`Connect` 是握手：域名由传输集成方在构造 `RuntimeBridgePeer` 时传入（`RuntimeDomain` 本身没有名字属性），请求域名不匹配时回 `DomainNotFound` 并关闭连接，成功则返回根锚点 `addr`；其余握手失败（畸形请求、重复 `Connect`）只回错不关闭连接。
 - 下行事件帧含 `event`/`subscription`/`addr`/`channel`，客户端凭 `subscription` 精确分发；没有订阅者的事件不产生帧。
 - 错误以 `{ok:false, error:{code, message}}` 返回；错误码全集：`MalformedMessage`、`UnknownOp`、`DomainNotFound`、`SessionNotEstablished`、`ObjectNotFound`、`AddrInvalid`、`SubscriptionInvalid`、`OperationFailed`。单条消息上限 1 MiB，超过回 `MalformedMessage` 并关闭连接。协议无版本概念，未识别字段一律忽略。完整消息格式见 `docs/superpowers/specs/2026-08-18-runtime-bridge-messagepack-protocol-design.md`。
 - MessagePack 编解码由 vendored 的 msgpack11（`third_party/msgpack11/`，MIT）提供，随静态库编译。
@@ -239,7 +239,7 @@ target_link_libraries(client PRIVATE IObject::IObject)
 
 ## 7. 当前拓扑实例与多域演进
 
-当前只有一个进程内函数局部 `static RuntimeTopology`，所有 `Runtime` 工厂创建的节点均接入该单一全局拓扑。节点创建时会缓存一个非拥有的 `RuntimeTopology* topology_`，后续 `Connect`、`Disconnect`、查询与释放均直接通过该指针访问拓扑；该缓存不改变当前公开 Runtime API、DAG 规则、事件或生命周期。
+当前只有一个进程内全局 `RuntimeTopology`（函数局部 `static` 指针指向堆对象，刻意永不析构以规避静态析构顺序问题），所有 `Runtime` 工厂创建的节点均接入该单一全局拓扑。节点创建时会缓存一个非拥有的 `RuntimeTopology* topology_`，后续 `Connect`、`Disconnect`、查询与释放均直接通过该指针访问拓扑；该缓存不改变当前公开 Runtime API、DAG 规则、事件或生命周期。
 
 未来可由全局 `RuntimeDomainManager` 管理多个 `RuntimeDomain`，每个域独立持有一个 `RuntimeTopology`。届时连接仅允许发生在同一域；跨域 `Connect` 的第一版应返回 `false`，跨域引用留待后续模型解决。域的生命周期必须晚于其中所有节点的析构，因此节点保存的非拥有 `topology_` 指针在节点存活期间始终有效。这是规划，当前尚未实现多域管理或跨域规则。
 
@@ -249,6 +249,6 @@ target_link_libraries(client PRIVATE IObject::IObject)
 
 ## 8. 当前边界与后续规划
 
-当前内核包含：**`IRuntimeObject` 契约 + 私有静态库实现 + `Runtime` 创建门面 + 显式 `As<T>()` 类型转换 + 只读不透明数据通道 + 命名非拥有拓扑 + 对象级结构事件 + 远程桥接（`RuntimeDomain` / `RuntimeSession` / `RuntimeBridgePeer` 协议适配器，无真实传输层）**。
+当前内核包含：**`IRuntimeObject` 契约 + 私有静态库实现 + `Runtime` 创建门面 + 显式 `As<T>()` 类型转换 + 不透明数据通道读写 + 命名非拥有拓扑 + 对象级结构事件 + 远程桥接（`RuntimeDomain` / `RuntimeSession` / `RuntimeBridgePeer` 协议适配器，无真实传输层）**。
 
-恢复动态访问、方法、属性之前，应先定义统一 `Error` / `Result`、稳定对象 ID 与路径、批量变更、来源上下文和线程模型。示例 `example/01_WrappingTest.cpp` 仅演示创建方式、承载策略与调用方 `delete` 节点；`example/04_TypeConversionTest.cpp` 演示 `RegisterTypes` 与 `As<T>()`；`example/05_DataChannelTest.cpp` 演示可选原生 `ReadData`、空数据和失败路径；`example/09_RemoteBridgeTest.cpp` 演示域、会话与句柄；`example/10_MessagePackProtocolTest.cpp` 演示协议适配器的进程内回环往返。`example/` 均不是自动化单元测试；自动化测试位于 `tests/`（CTest）。
+恢复动态访问、方法、属性之前，应先定义统一 `Error` / `Result`、稳定对象 ID 与路径、批量变更、来源上下文和线程模型。示例目录 `example/`：`01_WrappingTest` 演示创建方式、承载策略与调用方 `delete` 节点；`02_TopologyTest` 演示拓扑连接与查询；`03_EventTest` 演示事件订阅与发布；`04_TypeConversionTest` 演示 `RegisterTypes` 与 `As<T>()`；`05_DataChannelTest` 演示可选原生 `ReadData`、空数据和失败路径；`06_DataChannelChangeTest` 演示数据变化通知；`07_PointerTest` 演示透明指针节点；`08_SubscribeChannelTest` 演示通道订阅同步；`09_RemoteBridgeTest` 演示域、会话与句柄；`10_MessagePackProtocolTest` 演示协议适配器的进程内回环往返。`example/` 均不是自动化单元测试；自动化测试位于 `tests/`（CTest）。
