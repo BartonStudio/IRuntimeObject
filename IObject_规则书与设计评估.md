@@ -100,7 +100,7 @@ public:
 
 该系统不是 schema、字符串类型系统、C++ 反射、动态 `invoke` 或转换链：框架不会自动枚举全部父类、成员或 `operator T*()`，也不会跨拓扑节点查找。需要公开的基类、组合成员或复杂转换必须在 `RegisterTypes` 中明确登记；用户定义的转换运算符可在自定义回调内自行调用。`As<T>()` 返回的是非拥有指针，不改变原生对象的生命周期，也不提供对象所有权提取。
 
-### 3.2 数据通道
+### 3.3 数据通道
 
 `IRuntimeObject::ReadData(DataChannelView channel, DataReceiver receiver) const` 提供同步的一次性不透明字节读取，`IRuntimeObject::WriteData(DataChannelView channel, ByteInput data)` 提供同步写入。通道是大小写敏感的业务字符串，例如 `"State"` 或 `"NetworkSnapshot"`；框架不维护全局通道表，也不会将通道解释为属性名、schema 或序列化格式。
 
@@ -127,7 +127,7 @@ object->Publish(
     true);
 ```
 
-### 3.3 数据通道订阅
+### 3.4 数据通道订阅
 
 `SubscribeChannel` 是已实现的本地、同步、无初始快照的通道同步关系。它有三种等价入口，均返回可移动、不可复制的 `RuntimeSubscription`：
 
@@ -158,7 +158,7 @@ iobject::SubscribeChannel(source, sourceChannel, target, targetChannel);
 
 `RuntimeSubscription` 的析构和幂等 `Cancel()` 均会解除通道订阅；源或目标 `Release` / 析构时也会自动解除，失效句柄的 `IsActive()` 返回 `false`。`SubscribeEvent` 与 `SubscribeChannel` 共用这一句柄模型。普通事件订阅者仍可在收到 `DataChannelChanged` 后自行检查通道并按需 `ReadData`；框架不直接向它们推送字节，不缓存数据，也没有版本号、错误对象或后台队列。原生读写逻辑、读取接收器和事件处理器抛出的 C++ 异常保持原样向调用方传播，异常策略由业务代码负责。
 
-### 3.4 数据通道后续演进（未来设计）
+### 3.5 数据通道后续演进（未来设计）
 
 当前本地同步保持同步、逐次、无状态：一次变化会立即读取源通道并写入目标，不保存字节、不压缩连续变化，也不向后台提交任务。以下能力尚未实现；`SubscribeChannel` 只是未来远程能力可复用的本地基础：
 
@@ -202,7 +202,31 @@ delete root;
 - 同一最外层事件及其同步嵌套发布共享私有派发上下文。若当前活跃路径重复出现相同的 `(事件源指针, 事件类型)`，框架输出诊断并截断该次待发布事件；不禁止自订阅或双向订阅；
 - 同一事件链最大嵌套发布深度为 32、最大成功发布次数为 128。第 33 层或第 129 次待发布事件会向 `std::cerr` 输出中文诊断并被截断；此前已完成的派发不回滚，调用正常返回。
 
-## 5. 构建、安装与使用
+## 5. 远程桥接
+
+### 5.1 域与根锚点
+
+- `RuntimeDomain` 对应当前单一全局拓扑，构造时自动创建并持有纯运行时根锚点（`RootAnchor()`）与唯一 `RuntimeBridgeRoot`（`BridgeRoot()`）；第一版每个进程只应存在一个 `RuntimeDomain` 实例，多实例共享同一全局拓扑且跨"域"关系不会被阻止。
+- 根锚点在域及桥接服务存活期间不得 `Release` 或 `delete`（约定，不加运行时分支）。销毁顺序：先关闭全部 `RuntimeSession`，再销毁业务对象，最后销毁域。
+- 远程可见范围是从根锚点沿 `Connect` 向下可达的子树；未接入子树的域内对象远程不可见、不可查。可见范围约束发现，不约束已建立的访问：对象被 `Disconnect` 移出子树后，已持有句柄的远程端在对象 `Release` 前仍可访问它。
+- 远程端不能 `Connect`/`Disconnect`/`Release`/`As<T>`：拓扑与生命周期只由 C++ 管理。
+
+### 5.2 会话与句柄
+
+- `RuntimeSession` 由 `RuntimeBridgeRoot::OpenSession()` 创建，方法对应远程端接口：`RootObject()`（根锚点句柄）、`ResolveChild`、`ReadData`/`WriteData`、`SubscribeEvent`/`CancelEvent`、`HasObject`、`Close`/`IsOpen`。
+- 会话为每个被引用对象分配会话内不透明 `RemoteObjectHandle`（协议中称 `addr`，不暴露内存地址，跨会话独立）；同一对象经多条路径到达返回同一句柄。对象 `Release` 或析构后句柄立即失效；会话关闭时全部句柄与订阅失效。
+- 会话经一个私有中继节点登记全部远程订阅（满足订阅者必须是 `IRuntimeObject` 的既有规则）；对象 `Release` 时远程订阅者能收到 `Released` 通知。
+- 事件消息第一版不传输通用载荷，仅在载荷可 `As<DataChannelChangedEventData>()` 时携带 `channel`。
+
+### 5.3 消息协议与适配器
+
+- `RuntimeBridgePeer` 把一个传输连接映射到一个 `RuntimeSession`：传输层每收到一条完整 MessagePack 消息就调用 `ReceiveMessage`，适配器把请求翻译成 `RuntimeSession` 调用，经 `SendCallback` 发回响应帧与事件帧；帧字节仅在 `SendCallback` 调用期间有效。真实传输层（WebSocket 等）未实现，接入时只需把收发接到这两个点。
+- 协议操作集：`Connect`（握手，校验域名，成功返回根锚点 `addr`，失败关闭连接）、`GetChildItem`（`childId` 为非空单层名称，响应回显 `childId` 并返回子对象 `addr`）、`ReadData`/`WriteData`（`data` 为 MessagePack bin）、`SubscribeEvent`/`CancelEvent`、`Close`（传输断开等价隐式 `Close`）。
+- 下行事件帧含 `event`/`subscription`/`addr`/`channel`，客户端凭 `subscription` 精确分发；没有订阅者的事件不产生帧。
+- 错误以 `{ok:false, error:{code, message}}` 返回；错误码全集：`MalformedMessage`、`UnknownOp`、`DomainNotFound`、`SessionNotEstablished`、`ObjectNotFound`、`AddrInvalid`、`SubscriptionInvalid`、`OperationFailed`。单条消息上限 1 MiB，超过回 `MalformedMessage` 并关闭连接。协议无版本概念，未识别字段一律忽略。完整消息格式见 `docs/superpowers/specs/2026-08-18-runtime-bridge-messagepack-protocol-design.md`。
+- MessagePack 编解码由 vendored 的 msgpack11（`third_party/msgpack11/`，MIT）提供，随静态库编译。
+
+## 6. 构建、安装与使用
 
 构建目标是 `IObject`，项目内可使用别名 `IObject::IObject`。安装会导出 CMake 包，外部项目可使用：
 
@@ -213,7 +237,7 @@ target_link_libraries(client PRIVATE IObject::IObject)
 
 安装内容仅包括静态库、上述六个头文件和 CMake package 配置。内部工厂桥接位于 `iobject::detail`，仅为模板门面链接静态库所需，调用方不应直接依赖。
 
-## 6. 当前拓扑实例与多域演进
+## 7. 当前拓扑实例与多域演进
 
 当前只有一个进程内函数局部 `static RuntimeTopology`，所有 `Runtime` 工厂创建的节点均接入该单一全局拓扑。节点创建时会缓存一个非拥有的 `RuntimeTopology* topology_`，后续 `Connect`、`Disconnect`、查询与释放均直接通过该指针访问拓扑；该缓存不改变当前公开 Runtime API、DAG 规则、事件或生命周期。
 
@@ -221,31 +245,7 @@ target_link_libraries(client PRIVATE IObject::IObject)
 
 缓存 `topology_` 只消除了每次操作重新取得全局单例的间接访问，不能解决 `RuntimeTopology::rebuildIncoming()` 在每次拓扑变更时全图重建入边索引的性能问题；该问题需要独立的数据结构优化。
 
-`RuntimeDomain`、`RuntimeSession` 与协议适配器 `RuntimeBridgePeer` 均已实现第一版，规则见第 7 节。
-
-## 7. 远程桥接
-
-### 7.1 域与根锚点
-
-- `RuntimeDomain` 对应当前单一全局拓扑，构造时自动创建并持有纯运行时根锚点（`RootAnchor()`）与唯一 `RuntimeBridgeRoot`（`BridgeRoot()`）；第一版每个进程只应存在一个 `RuntimeDomain` 实例，多实例共享同一全局拓扑且跨"域"关系不会被阻止。
-- 根锚点在域及桥接服务存活期间不得 `Release` 或 `delete`（约定，不加运行时分支）。销毁顺序：先关闭全部 `RuntimeSession`，再销毁业务对象，最后销毁域。
-- 远程可见范围是从根锚点沿 `Connect` 向下可达的子树；未接入子树的域内对象远程不可见、不可查。可见范围约束发现，不约束已建立的访问：对象被 `Disconnect` 移出子树后，已持有句柄的远程端在对象 `Release` 前仍可访问它。
-- 远程端不能 `Connect`/`Disconnect`/`Release`/`As<T>`：拓扑与生命周期只由 C++ 管理。
-
-### 7.2 会话与句柄
-
-- `RuntimeSession` 由 `RuntimeBridgeRoot::OpenSession()` 创建，方法对应远程端接口：`RootObject()`（根锚点句柄）、`ResolveChild`、`ReadData`/`WriteData`、`SubscribeEvent`/`CancelEvent`、`HasObject`、`Close`/`IsOpen`。
-- 会话为每个被引用对象分配会话内不透明 `RemoteObjectHandle`（协议中称 `addr`，不暴露内存地址，跨会话独立）；同一对象经多条路径到达返回同一句柄。对象 `Release` 或析构后句柄立即失效；会话关闭时全部句柄与订阅失效。
-- 会话经一个私有中继节点登记全部远程订阅（满足订阅者必须是 `IRuntimeObject` 的既有规则）；对象 `Release` 时远程订阅者能收到 `Released` 通知。
-- 事件消息第一版不传输通用载荷，仅在载荷可 `As<DataChannelChangedEventData>()` 时携带 `channel`。
-
-### 7.3 消息协议与适配器
-
-- `RuntimeBridgePeer` 把一个传输连接映射到一个 `RuntimeSession`：传输层每收到一条完整 MessagePack 消息就调用 `ReceiveMessage`，适配器把请求翻译成 `RuntimeSession` 调用，经 `SendCallback` 发回响应帧与事件帧；帧字节仅在 `SendCallback` 调用期间有效。真实传输层（WebSocket 等）未实现，接入时只需把收发接到这两个点。
-- 协议操作集：`Connect`（握手，校验域名，成功返回根锚点 `addr`，失败关闭连接）、`GetChildItem`（`childId` 为非空单层名称，响应回显 `childId` 并返回子对象 `addr`）、`ReadData`/`WriteData`（`data` 为 MessagePack bin）、`SubscribeEvent`/`CancelEvent`、`Close`（传输断开等价隐式 `Close`）。
-- 下行事件帧含 `event`/`subscription`/`addr`/`channel`，客户端凭 `subscription` 精确分发；没有订阅者的事件不产生帧。
-- 错误以 `{ok:false, error:{code, message}}` 返回；错误码全集：`MalformedMessage`、`UnknownOp`、`DomainNotFound`、`SessionNotEstablished`、`ObjectNotFound`、`AddrInvalid`、`SubscriptionInvalid`、`OperationFailed`。单条消息上限 1 MiB，超过回 `MalformedMessage` 并关闭连接。协议无版本概念，未识别字段一律忽略。完整消息格式见 `docs/superpowers/specs/2026-08-18-runtime-bridge-messagepack-protocol-design.md`。
-- MessagePack 编解码由 vendored 的 msgpack11（`third_party/msgpack11/`，MIT）提供，随静态库编译。
+`RuntimeDomain`、`RuntimeSession` 与协议适配器 `RuntimeBridgePeer` 均已实现第一版，规则见第 5 节。
 
 ## 8. 当前边界与后续规划
 
