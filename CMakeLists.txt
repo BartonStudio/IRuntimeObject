@@ -7,6 +7,7 @@ add_library(IObject STATIC
     src/RuntimeObject.cpp
     src/RuntimeDomain.cpp
     src/RuntimeBridge.cpp
+    third_party/msgpack11/msgpack11.cpp
 )
 add_library(IObject::IObject ALIAS IObject)
 
@@ -17,6 +18,7 @@ target_include_directories(IObject
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/msgpack11
 )
 
 if(MSVC)
