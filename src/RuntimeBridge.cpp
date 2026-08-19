@@ -32,15 +32,21 @@ struct RuntimeSession::Impl {
             return found->second;
         }
 
+        // 监视 Released：对象退出 IRuntimeObject 系统后句柄立即失效。
+        // 先建立订阅并验证成功，再统一登记三张表；订阅失败则不登记句柄，避免失去失效保护。
+        RuntimeSubscription watch = relay->SubscribeEvent(
+            object, RuntimeEventTypes::Released,
+            [this, object](const RuntimeObjectEvent&) {
+                invalidate(object);
+            });
+        if (!watch.IsActive()) {
+            return 0;
+        }
+
         const RemoteObjectHandle handle = nextHandle++;
         handlesByObject.emplace(object, handle);
         objectsByHandle.emplace(handle, object);
-        // 监视 Released：对象退出 IRuntimeObject 系统后句柄立即失效。
-        releaseWatchByObject.emplace(
-            object, relay->SubscribeEvent(object, RuntimeEventTypes::Released,
-                                          [this, object](const RuntimeObjectEvent&) {
-                                              invalidate(object);
-                                          }));
+        releaseWatchByObject.emplace(object, std::move(watch));
         return handle;
     }
 
@@ -97,6 +103,9 @@ RuntimeSession::~RuntimeSession() {
 }
 
 RemoteObjectHandle RuntimeSession::ResolveRootChild(const std::string& path) {
+    if (!impl_->open) {
+        return 0;
+    }
     return impl_->registerObject(impl_->rootAnchor->GetChildItem(path));
 }
 
@@ -165,8 +174,9 @@ std::unique_ptr<RuntimeSession> RuntimeBridgeRoot::OpenSession() {
     if (rootAnchor_ == nullptr) {
         return nullptr;
     }
-    IRuntimeObject* relay = Runtime::make();
-    return std::unique_ptr<RuntimeSession>(new RuntimeSession(rootAnchor_, relay));
+    // 用 unique_ptr 守护 relay：RuntimeSession 构造抛异常时自动回收，避免泄漏。
+    std::unique_ptr<IRuntimeObject> relayGuard(Runtime::make());
+    return std::unique_ptr<RuntimeSession>(new RuntimeSession(rootAnchor_, relayGuard.release()));
 }
 
 } // namespace iobject
