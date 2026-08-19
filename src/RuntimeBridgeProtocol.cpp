@@ -122,11 +122,37 @@ struct RuntimeBridgePeer::Impl {
 
         if (op == "Connect") {
             handleConnect(id, request);
+        } else if (op == "GetChildItem") {
+            handleGetChildItem(id, request);
         } else if (op == "Close") {
             handleClose(id);
         } else {
             sendMessage(errorResponse(id, "UnknownOp", "未知操作: " + op));
         }
+    }
+
+    void handleGetChildItem(std::uint64_t id, const MsgPack& request) {
+        std::uint64_t addr = 0;
+        std::string childId;
+        if (!asUint64(request["addr"], addr) || addr == 0
+            || !asString(request["childId"], childId)) {
+            sendMessage(errorResponse(id, "MalformedMessage", "缺少合法的 addr 或 childId 字段"));
+            return;
+        }
+        if (childId.empty() || childId.find('.') != std::string::npos) {
+            sendMessage(errorResponse(id, "MalformedMessage", "childId 必须是非空单层名称"));
+            return;
+        }
+        if (!session->HasObject(addr)) {
+            sendMessage(errorResponse(id, "AddrInvalid", "addr 无效或已失效"));
+            return;
+        }
+        const RemoteObjectHandle child = session->ResolveChild(addr, childId);
+        if (child == 0) {
+            sendMessage(errorResponse(id, "ObjectNotFound", "子对象不存在: " + childId));
+            return;
+        }
+        sendMessage(okResponse(id, {{"childId", MsgPack(childId)}, {"addr", MsgPack(child)}}));
     }
 
     void handleConnect(std::uint64_t id, const MsgPack& request) {
