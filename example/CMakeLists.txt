@@ -21,3 +21,6 @@ target_link_libraries(test_07_pointer PRIVATE IObject::IObject)
 
 add_executable(test_08_subscribe_channel 08_SubscribeChannelTest.cpp)
 target_link_libraries(test_08_subscribe_channel PRIVATE IObject::IObject)
+
+add_executable(test_09_remote_bridge 09_RemoteBridgeTest.cpp)
+target_link_libraries(test_09_remote_bridge PRIVATE IObject::IObject)
