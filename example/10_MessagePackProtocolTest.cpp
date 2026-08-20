@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -23,22 +24,37 @@ public:
         if (channel != "State") {
             return false;
         }
-        const std::uint8_t bytes[1] = {static_cast<std::uint8_t>(on_ ? 1 : 0)};
-        receiver(iobject::ByteView(bytes, 1));
+        receiver(iobject::ByteView(
+            reinterpret_cast<const std::uint8_t*>(state_.data()), state_.size()));
         return true;
     }
 
     bool WriteData(iobject::DataChannelView channel, iobject::ByteInput data) {
-        if (channel != "State" || data.size() != 1) {
+        if (channel != "State" || data.empty()) {
             return false;
         }
-        on_ = data[0] != 0;
+        state_.assign(reinterpret_cast<const char*>(data.data()), data.size());
         return true;
     }
 
 private:
-    bool on_ = false;
+    std::string state_ = "off";
 };
+
+// 演示辅助：字符串与 MessagePack bin 互转。
+MsgPack::binary toBinary(const char* text) {
+    const std::size_t length = std::strlen(text);
+    return MsgPack::binary(reinterpret_cast<const std::uint8_t*>(text),
+                           reinterpret_cast<const std::uint8_t*>(text) + length);
+}
+
+std::string toText(const MsgPack& value) {
+    if (!value.is_binary()) {
+        return {};
+    }
+    const MsgPack::binary& bytes = value.binary_items();
+    return std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+}
 
 struct Loopback {
     iobject::RuntimeDomain domain;
@@ -103,11 +119,10 @@ int main() {
     loop.call({{"op", MsgPack("WriteData")},
                {"addr", MsgPack(lampAddr)},
                {"channel", MsgPack("State")},
-               {"data", MsgPack(MsgPack::binary{1})}});
+               {"data", MsgPack(toBinary("on"))}});
     const MsgPack read = loop.call(
         {{"op", MsgPack("ReadData")}, {"addr", MsgPack(lampAddr)}, {"channel", MsgPack("State")}});
-    std::printf("3. ReadData State -> %u\n",
-                read["data"].is_binary() ? static_cast<unsigned>(read["data"].binary_items()[0]) : 0u);
+    std::printf("3. ReadData State -> \"%s\"\n", toText(read["data"]).c_str());
 
     // 5. 订阅 Lamp 的事件并发布，演示事件下行帧；随后取消订阅。
     const MsgPack sub = loop.call({{"op", MsgPack("SubscribeEvent")},
@@ -120,12 +135,10 @@ int main() {
     lamp->Publish(iobject::RuntimeEventTypes::DataChannelChanged,
                   iobject::Runtime::make<iobject::DataChannelChangedEventData>("State"), true);
     const MsgPack event = loop.lastFrame();
-    std::printf("   事件帧 event=%s channel=%s data=%u（变化当次的字节快照）\n",
+    std::printf("   事件帧 event=%s channel=%s data=\"%s\"（变化当次的字节快照）\n",
                 event["event"].string_value().c_str(),
                 event["channel"].string_value().c_str(),
-                event["data"].is_binary()
-                    ? static_cast<unsigned>(event["data"].binary_items()[0])
-                    : 0u);
+                toText(event["data"]).c_str());
     loop.call({{"op", MsgPack("CancelEvent")}, {"subscription", MsgPack(lampSub)}});
 
     // 6. 通道同步：C++ 侧建立 Mirror 跟随 Lamp 的 State（本地能力，协议无此 op），
@@ -143,32 +156,28 @@ int main() {
                {"addr", MsgPack(mirrorAddr)},
                {"type", MsgPack("DataChannelChanged")}});
 
-    // 远程把 Lamp 的 State 改写为 0；C++ 业务按规则显式发布变化事件。
+    // 远程把 Lamp 的 State 改写为 "off"；C++ 业务按规则显式发布变化事件。
     loop.call({{"op", MsgPack("WriteData")},
                {"addr", MsgPack(lampAddr)},
                {"channel", MsgPack("State")},
-               {"data", MsgPack(MsgPack::binary{0})}});
+               {"data", MsgPack(toBinary("off"))}});
     lamp->Publish(iobject::RuntimeEventTypes::DataChannelChanged,
                   iobject::Runtime::make<iobject::DataChannelChangedEventData>("State"), true);
 
     // 同步链路自动执行：读 Lamp -> 写 Mirror -> 发布 Mirror 的 DataChannelChanged。
     const MsgPack mirrorEvent = loop.lastFrame();
-    std::printf("5. 通道同步：收到事件 addr=%llu（Mirror）event=%s channel=%s data=%u\n",
+    std::printf("5. 通道同步：收到事件 addr=%llu（Mirror）event=%s channel=%s data=\"%s\"\n",
                 static_cast<unsigned long long>(mirrorEvent["addr"].int64_value()),
                 mirrorEvent["event"].string_value().c_str(),
                 mirrorEvent["channel"].string_value().c_str(),
-                mirrorEvent["data"].is_binary()
-                    ? static_cast<unsigned>(mirrorEvent["data"].binary_items()[0])
-                    : 0u);
+                toText(mirrorEvent["data"]).c_str());
 
     // 远程读 Mirror，验证同步写入的值。
     const MsgPack mirrorRead = loop.call({{"op", MsgPack("ReadData")},
                                           {"addr", MsgPack(mirrorAddr)},
                                           {"channel", MsgPack("State")}});
-    std::printf("   ReadData Mirror.State -> %u（已跟随 Lamp 变为 0）\n",
-                mirrorRead["data"].is_binary()
-                    ? static_cast<unsigned>(mirrorRead["data"].binary_items()[0])
-                    : 0u);
+    std::printf("   ReadData Mirror.State -> \"%s\"（已跟随 Lamp 变为 off）\n",
+                toText(mirrorRead["data"]).c_str());
 
     // 7. 关闭。
     const MsgPack bye = loop.call({{"op", MsgPack("Close")}});
