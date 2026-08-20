@@ -120,8 +120,12 @@ int main() {
     lamp->Publish(iobject::RuntimeEventTypes::DataChannelChanged,
                   iobject::Runtime::make<iobject::DataChannelChangedEventData>("State"), true);
     const MsgPack event = loop.lastFrame();
-    std::printf("   事件帧 event=%s channel=%s\n", event["event"].string_value().c_str(),
-                event["channel"].string_value().c_str());
+    std::printf("   事件帧 event=%s channel=%s data=%u（变化当次的字节快照）\n",
+                event["event"].string_value().c_str(),
+                event["channel"].string_value().c_str(),
+                event["data"].is_binary()
+                    ? static_cast<unsigned>(event["data"].binary_items()[0])
+                    : 0u);
     loop.call({{"op", MsgPack("CancelEvent")}, {"subscription", MsgPack(lampSub)}});
 
     // 6. 通道同步：C++ 侧建立 Mirror 跟随 Lamp 的 State（本地能力，协议无此 op），
@@ -149,10 +153,13 @@ int main() {
 
     // 同步链路自动执行：读 Lamp -> 写 Mirror -> 发布 Mirror 的 DataChannelChanged。
     const MsgPack mirrorEvent = loop.lastFrame();
-    std::printf("5. 通道同步：收到事件 addr=%llu（Mirror）event=%s channel=%s\n",
+    std::printf("5. 通道同步：收到事件 addr=%llu（Mirror）event=%s channel=%s data=%u\n",
                 static_cast<unsigned long long>(mirrorEvent["addr"].int64_value()),
                 mirrorEvent["event"].string_value().c_str(),
-                mirrorEvent["channel"].string_value().c_str());
+                mirrorEvent["channel"].string_value().c_str(),
+                mirrorEvent["data"].is_binary()
+                    ? static_cast<unsigned>(mirrorEvent["data"].binary_items()[0])
+                    : 0u);
 
     // 远程读 Mirror，验证同步写入的值。
     const MsgPack mirrorRead = loop.call({{"op", MsgPack("ReadData")},

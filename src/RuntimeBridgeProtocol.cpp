@@ -231,11 +231,15 @@ struct RuntimeBridgePeer::Impl {
         const std::uint64_t subscription = session->SubscribeEvent(
             addr, type,
             [this, subscriptionCell](const RemoteEventMessage& message) {
-                sendMessage(MsgPack(MsgPack::object{
+                MsgPack::object frame{
                     {"event", MsgPack(message.type)},
                     {"subscription", MsgPack(*subscriptionCell)},
                     {"addr", MsgPack(message.source)},
-                    {"channel", MsgPack(message.channel)}}));
+                    {"channel", MsgPack(message.channel)}};
+                if (message.data.has_value()) {
+                    frame.emplace(MsgPack("data"), MsgPack(*message.data));
+                }
+                sendMessage(MsgPack(std::move(frame)));
             });
         if (subscription == 0) {
             sendMessage(errorResponse(id, "OperationFailed", "订阅失败"));

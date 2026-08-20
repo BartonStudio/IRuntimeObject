@@ -102,13 +102,14 @@
 服务端主动推送，无 `id`：
 
 ```text
-← { "event": "DataChannelChanged", "subscription": 864197523, "addr": 1745238901234563, "channel": "State" }
+← { "event": "DataChannelChanged", "subscription": 864197523, "addr": 1745238901234563, "channel": "State", "data": <bin> }
 ```
 
 - `event`：事件类型字符串，与 C++ 侧完全一致（内置常量或业务自定义）；
 - `subscription`：订阅 ID，客户端凭它精确分发到注册的回调，同对象同类型多次订阅不混淆；
 - `addr`：事件源对象的 addr（`RemoteEventMessage.source`）；
-- `channel`：始终存在；仅 `DataChannelChanged` 事件为非空（载荷可 `As<DataChannelChangedEventData>()` 时取其通道名），其余事件为空字符串。第一版不传输其他载荷。
+- `channel`：始终存在；仅 `DataChannelChanged` 事件为非空（载荷可 `As<DataChannelChangedEventData>()` 时取其通道名），其余事件为空字符串；
+- `data`：**可选**——`DataChannelChanged` 事件在派发当次对源对象 `ReadData` 该通道成功时携带的字节快照（MessagePack bin，空字节合法，判断字段存在性而非长度）。读取失败或其他事件类型时不携带，客户端应回退到主动 `ReadData` 拉取。快照在每次远程订阅的事件上都会产生（无按需开关），高频大流量通道需留意开销。
 - 没有订阅者的事件不产生任何帧。
 - 对象 `Release` 时，已订阅的客户端收到 `{ "event": "Released", ... }`，此后该 addr 的一切操作回 `AddrInvalid`。
 
@@ -172,4 +173,4 @@ RuntimeSession（已实现）
 - `childId` 为空或含 `.` 时返回 `MalformedMessage`（协议规定它是单层名称）。
 - 对象 `Release` 后被内核自动取消的订阅，之后 `CancelEvent` 返回 ok（幂等从简）；`SubscriptionInvalid` 只覆盖从未存在或已被显式取消的 ID。
 - 单条消息上限按建议值实现为 1 MiB，超过回 `MalformedMessage`（`id: 0`）并关闭连接。
-- 事件帧 `channel` 字段仅 `DataChannelChanged` 非空；通用载荷快照（载荷对象的 `ReadData` 约定）是后续候选方向，当前未实现。
+- 事件帧 `channel` 字段仅 `DataChannelChanged` 非空；此类事件在派发当次对源对象 `ReadData` 成功时携带 `data` 字节快照（已实现），通用事件载荷的传输仍未实现。

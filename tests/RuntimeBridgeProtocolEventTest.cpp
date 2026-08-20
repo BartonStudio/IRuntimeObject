@@ -25,6 +25,22 @@ public:
                        true);
     }
 
+    // 发布一个不可读通道的变化通知，用于验证"读失败则事件帧不带 data"。
+    void PublishMissing() {
+        node_->Publish(iobject::RuntimeEventTypes::DataChannelChanged,
+                       iobject::Runtime::make<iobject::DataChannelChangedEventData>("Missing"),
+                       true);
+    }
+
+    bool ReadData(iobject::DataChannelView channel, iobject::DataReceiver receiver) const {
+        if (channel != "Value") {
+            return false;
+        }
+        const std::uint8_t bytes[1] = {static_cast<std::uint8_t>(value_)};
+        receiver(iobject::ByteView(bytes, 1));
+        return true;
+    }
+
     void Attach(iobject::IRuntimeObject* node) {
         node_ = node;
     }
@@ -113,7 +129,7 @@ int main() {
         static_cast<std::uint64_t>(subscribed["subscription"].int64_value());
     TEST_CHECK(subscription != 0);
 
-    // 2. C++ 侧发布：事件下行帧带 event/subscription/addr/channel。
+    // 2. C++ 侧发布：事件下行帧带 event/subscription/addr/channel，并携带数据快照。
     const std::size_t framesBefore = loop.outbox.size();
     counter->Increase();
     TEST_CHECK(loop.outbox.size() == framesBefore + 1);
@@ -122,6 +138,18 @@ int main() {
     TEST_CHECK(static_cast<std::uint64_t>(event["subscription"].int64_value()) == subscription);
     TEST_CHECK(static_cast<std::uint64_t>(event["addr"].int64_value()) == addr);
     TEST_CHECK(event["channel"].string_value() == "Value");
+    // 数据快照：变化当次 ReadData 的字节（value_ 递增后为 1）。
+    TEST_CHECK(event["data"].is_binary());
+    TEST_CHECK(event["data"].binary_items().size() == 1);
+    TEST_CHECK(event["data"].binary_items()[0] == 1);
+
+    // 2b. 通道当次读取失败：事件帧不携带 data 字段，降级为纯通知。
+    counter->PublishMissing();
+    TEST_CHECK(loop.outbox.size() == framesBefore + 2);
+    const MsgPack degraded = loop.lastFrame();
+    TEST_CHECK(degraded["event"].string_value() == "DataChannelChanged");
+    TEST_CHECK(degraded["channel"].string_value() == "Missing");
+    TEST_CHECK(degraded["data"].is_null());
 
     // 3. CancelEvent：ok；再次取消同一订阅：SubscriptionInvalid。
     TEST_CHECK(loop.call("CancelEvent",

@@ -216,13 +216,13 @@ delete root;
 - `RuntimeSession` 由 `RuntimeBridgeRoot::OpenSession()` 创建（根锚点不可用时返回 `nullptr`），方法对应远程端接口：`RootObject()`（根锚点句柄）、`ResolveRootChild`（对应 JS `runtime.Root.GetChildItem`）、`ResolveChild`、`ReadData`/`WriteData`、`SubscribeEvent`/`CancelEvent`、`HasObject`、`Close`/`IsOpen`。
 - 会话为每个被引用对象分配会话内不透明 `RemoteObjectHandle`（协议中称 `addr`，不暴露内存地址，跨会话独立）；同一对象经多条路径到达返回同一句柄。句柄 `0` 是无效哨兵值：解析未命中、无效句柄参数、会话关闭后的查询均返回 `0`。对象 `Release` 或析构后句柄立即失效；会话关闭时全部句柄与订阅失效。
 - 会话经一个私有中继节点登记全部远程订阅（满足订阅者必须是 `IRuntimeObject` 的既有规则）；对象 `Release` 时远程订阅者能收到 `Released` 通知。
-- 事件消息第一版不传输通用载荷，仅在载荷可 `As<DataChannelChangedEventData>()` 时携带 `channel`。
+- 事件消息不传输通用载荷；`DataChannelChanged` 事件在派发当次对源对象 `ReadData` 成功时携带该通道的字节快照（读失败则不带，远程端回退主动拉取）。
 
 ### 5.3 消息协议与适配器
 
 - `RuntimeBridgePeer` 把一个传输连接映射到一个 `RuntimeSession`：传输层每收到一条完整 MessagePack 消息就调用 `ReceiveMessage`，适配器把请求翻译成 `RuntimeSession` 调用，经 `SendCallback` 发回响应帧与事件帧；帧字节仅在 `SendCallback` 调用期间有效。真实传输层（WebSocket 等）未实现，接入时只需把收发接到这两个点。
 - 协议操作集：`Connect`、`GetChildItem`（`childId` 为非空单层名称，响应回显 `childId` 并返回子对象 `addr`）、`ReadData`/`WriteData`（`data` 为 MessagePack bin）、`SubscribeEvent`/`CancelEvent`、`Close`（传输断开等价隐式 `Close`）。`Connect` 是握手：域名由传输集成方在构造 `RuntimeBridgePeer` 时传入（`RuntimeDomain` 本身没有名字属性），请求域名不匹配时回 `DomainNotFound` 并关闭连接，成功则返回根锚点 `addr`；其余握手失败（畸形请求、重复 `Connect`）只回错不关闭连接。
-- 下行事件帧含 `event`/`subscription`/`addr`/`channel`，客户端凭 `subscription` 精确分发；没有订阅者的事件不产生帧。
+- 下行事件帧含 `event`/`subscription`/`addr`/`channel`，客户端凭 `subscription` 精确分发；没有订阅者的事件不产生帧。`DataChannelChanged` 事件额外携带可选 `data` 字段（变化当次的通道字节快照）。
 - 错误以 `{ok:false, error:{code, message}}` 返回；错误码全集：`MalformedMessage`、`UnknownOp`、`DomainNotFound`、`SessionNotEstablished`、`ObjectNotFound`、`AddrInvalid`、`SubscriptionInvalid`、`OperationFailed`。单条消息上限 1 MiB，超过回 `MalformedMessage` 并关闭连接。协议无版本概念，未识别字段一律忽略。完整消息格式见 `docs/superpowers/specs/2026-08-18-runtime-bridge-messagepack-protocol-design.md`。
 - MessagePack 编解码由 vendored 的 msgpack11（`third_party/msgpack11/`，MIT）提供，随静态库编译。
 

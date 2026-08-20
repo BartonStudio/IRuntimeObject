@@ -146,6 +146,15 @@ std::uint64_t RuntimeSession::SubscribeEvent(RemoteObjectHandle handle, RuntimeE
                     message.channel = changed->channel;
                 }
             }
+            // 数据快照：通道变化通知在派发窗口内同步读取源对象；读失败则不携带 data。
+            if (!message.channel.empty() && event.source != nullptr) {
+                std::vector<std::uint8_t> bytes;
+                if (event.source->ReadData(message.channel, [&bytes](ByteView view) {
+                        bytes.assign(view.begin(), view.end());
+                    })) {
+                    message.data = std::move(bytes);
+                }
+            }
             callback(message);
         });
     if (!subscription.IsActive()) {

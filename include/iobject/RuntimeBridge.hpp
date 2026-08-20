@@ -5,7 +5,9 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace iobject {
 
@@ -13,11 +15,14 @@ namespace iobject {
 using RemoteObjectHandle = std::uint64_t;
 
 /// 推送给远程端的事件消息。
-/// 第一版不传输通用事件载荷；仅当载荷可 As<DataChannelChangedEventData>() 时填充 channel。
+/// 不传输通用事件载荷；仅当载荷可 As<DataChannelChangedEventData>() 时填充 channel。
+/// channel 非空且事件源当次 ReadData 成功时，data 携带该通道的字节快照（含合法的空字节）；
+/// 其余事件或读取失败时 data 不存在，远程端应回退到主动 ReadData 拉取。
 struct RemoteEventMessage {
     RemoteObjectHandle source = 0;
     RuntimeEventType type;
     DataChannel channel;
+    std::optional<std::vector<std::uint8_t>> data;
 };
 
 using RemoteEventCallback = std::function<void(const RemoteEventMessage&)>;
