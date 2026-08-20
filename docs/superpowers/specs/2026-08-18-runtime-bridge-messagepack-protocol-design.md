@@ -8,7 +8,7 @@
 
 - **编码**：全部消息使用 MessagePack。选它的原因：schema-less、原生 bin 类型（不透明字节通道零膨胀）、有成熟 JS 库。不使用 protobuf（schema 驱动与不透明通道模型冲突），不使用 JSON+Base64（数据膨胀）。
 - **无版本概念**：协议不定义版本字段，不做版本兼容协商。消息中未识别的字段一律忽略（防御性解析，非版本机制）。
-- **对象标识 `addr`**：协议中对象的唯一标识，对应 C++ 侧 `RuntimeSession` 的 `RemoteObjectHandle` 值——会话内分配的不透明 64 位编号，会话内唯一，跨会话不可混用。`Connect` 成功时返回根锚点的 `addr`，之后一切对象操作都以 `addr` 指定目标。
+- **对象标识 `addr`**：协议中对象的唯一标识，对应 C++ 侧 `RuntimeSession` 的 `RemoteObjectHandle`——对象指针的数值形式，同一对象在任何会话中都是同一数值。`addr` 必须先在本会话登记（经 `GetChildItem` 或握手获得）才可用，未登记或已失效的数值不会被解析。`Connect` 成功时返回根锚点的 `addr`，之后一切对象操作都以 `addr` 指定目标。
 
 ## 2. 帧规则
 
@@ -29,7 +29,7 @@
   - `id`：回显请求的 `id`；
   - `ok`：布尔。`true` 时携带结果字段；`false` 时携带 `error`。
 - **下行事件**（服务端→客户端）不含 `id`，含 `event` 字段，借此与响应区分。
-- `addr`、`subscription`、`id` 均为无符号整数，**协议承诺不超过 2^53**（JS Number 精度上限）。`0` 保留为无效值，正常消息中不出现——子对象未命中、addr 失效等情况一律用 `ok: false` 表达。唯一例外：`MalformedMessage` 响应在无法从畸形请求中提取 `id` 时以 `id: 0` 回应（见第 6 节）。
+- `addr`、`subscription`、`id` 均为无符号整数，**协议承诺不超过 2^53**（JS Number 精度上限；`addr` 取对象指针数值，64 位用户态地址低于 2^48，满足此约束）。`0` 保留为无效值，正常消息中不出现——子对象未命中、addr 失效等情况一律用 `ok: false` 表达。唯一例外：`MalformedMessage` 响应在无法从畸形请求中提取 `id` 时以 `id: 0` 回应（见第 6 节）。
 
 ## 4. 操作消息全集
 
@@ -169,6 +169,7 @@ RuntimeSession（已实现）
 ## 10. 实现记录
 
 - 编解码库：msgpack11（`ar90n/msgpack11`，MIT），vendored 于 `third_party/msgpack11/`，随 IObject 静态库编译。
+- `addr` 实现为对象指针的数值形式（`reinterpret_cast<std::uint64_t>`），非自增分配；会话仍按登记制管理可用性，未登记数值不会被解析。
 - 重复 `Connect`（会话已建立后再次握手）返回 `OperationFailed`，规格第 4.1 节未覆盖此情形，以本节为准。
 - `childId` 为空或含 `.` 时返回 `MalformedMessage`（协议规定它是单层名称）。
 - 对象 `Release` 后被内核自动取消的订阅，之后 `CancelEvent` 返回 ok（幂等从简）；`SubscriptionInvalid` 只覆盖从未存在或已被显式取消的 ID。

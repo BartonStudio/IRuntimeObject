@@ -17,13 +17,14 @@ struct RuntimeSession::Impl {
     RemoteObjectHandle rootHandle = 0;     // 构造时登记的根锚点句柄。
     IRuntimeObject* relay = nullptr;       // 拥有：会话的中继订阅节点。
     bool open = true;
-    RemoteObjectHandle nextHandle = 1;
     std::uint64_t nextSubscriptionId = 1;
     std::map<IRuntimeObject*, RemoteObjectHandle> handlesByObject;
     std::map<RemoteObjectHandle, IRuntimeObject*> objectsByHandle;
     std::map<IRuntimeObject*, RuntimeSubscription> releaseWatchByObject;
     std::map<std::uint64_t, EventEntry> eventSubscriptions;
 
+    // 句柄取对象指针的数值形式：同一对象在任何会话中都是同一 addr；
+    // 未在本会话登记的 addr 不可用，登记关系仍由句柄表与 Released 失效监视管理。
     RemoteObjectHandle registerObject(IRuntimeObject* object) {
         if (!open || object == nullptr) {
             return 0;
@@ -44,7 +45,7 @@ struct RuntimeSession::Impl {
             return 0;
         }
 
-        const RemoteObjectHandle handle = nextHandle++;
+        const RemoteObjectHandle handle = reinterpret_cast<std::uint64_t>(object);
         handlesByObject.emplace(object, handle);
         objectsByHandle.emplace(handle, object);
         releaseWatchByObject.emplace(object, std::move(watch));

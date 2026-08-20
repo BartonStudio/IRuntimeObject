@@ -28,7 +28,7 @@
 | `RuntimeDomain` | 运行时域；当前对应单一全局拓扑，自动持有根锚点与桥接入口。 |
 | 根锚点 | 域持有的纯运行时根节点；其向下可达子树即远程可见范围。 |
 | `RuntimeSession` | 一个远程连接对应的会话，持有句柄表与订阅表。 |
-| `addr` | 协议中的对象标识，即会话内不透明的 `RemoteObjectHandle`。 |
+| `addr` | 协议中的对象标识，即 `RemoteObjectHandle`：对象指针的数值形式，同对象跨会话同值。 |
 | `RuntimeBridgePeer` | MessagePack 协议适配器，把一个传输连接映射到一个会话。 |
 
 ## 3. Runtime 创建与承载规则
@@ -214,7 +214,7 @@ delete root;
 ### 5.2 会话与句柄
 
 - `RuntimeSession` 由 `RuntimeBridgeRoot::OpenSession()` 创建（根锚点不可用时返回 `nullptr`），方法对应远程端接口：`RootObject()`（根锚点句柄）、`ResolveRootChild`（对应 JS `runtime.Root.GetChildItem`）、`ResolveChild`、`ReadData`/`WriteData`、`SubscribeEvent`/`CancelEvent`、`HasObject`、`Close`/`IsOpen`。
-- 会话为每个被引用对象分配会话内不透明 `RemoteObjectHandle`（协议中称 `addr`，不暴露内存地址，跨会话独立）；同一对象经多条路径到达返回同一句柄。句柄 `0` 是无效哨兵值：解析未命中、无效句柄参数、会话关闭后的查询均返回 `0`。对象 `Release` 或析构后句柄立即失效；会话关闭时全部句柄与订阅失效。
+- 会话为被引用对象登记 `RemoteObjectHandle`（协议中称 `addr`），取对象指针的数值形式：同一对象在任何会话中都是同一数值，经多条路径到达也返回同一句柄；未在本会话登记或已失效的数值不会被解析。句柄 `0` 是无效哨兵值：解析未命中、无效句柄参数、会话关闭后的查询均返回 `0`。对象 `Release` 或析构后句柄立即失效；会话关闭时全部句柄与订阅失效。
 - 会话经一个私有中继节点登记全部远程订阅（满足订阅者必须是 `IRuntimeObject` 的既有规则）；对象 `Release` 时远程订阅者能收到 `Released` 通知。
 - 事件消息不传输通用载荷；`DataChannelChanged` 事件在派发当次对源对象 `ReadData` 成功时携带该通道的字节快照（读失败则不带，远程端回退主动拉取）。
 
