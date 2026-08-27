@@ -125,6 +125,30 @@ bool RuntimeSession::WriteData(RemoteObjectHandle handle, DataChannelView channe
     return object != nullptr && object->WriteData(channel, data);
 }
 
+bool RuntimeSession::Invoke(RemoteObjectHandle handle, MethodView method, ByteInput args,
+                            DataReceiver result) {
+    IRuntimeObject* object = impl_->resolve(handle);
+    return object != nullptr && object->Invoke(method, args, std::move(result));
+}
+
+std::vector<std::pair<std::string, RemoteObjectHandle>>
+RuntimeSession::GetChildren(RemoteObjectHandle handle) {
+    std::vector<std::pair<std::string, RemoteObjectHandle>> children;
+    IRuntimeObject* object = impl_->resolve(handle);
+    if (object == nullptr) {
+        return children;
+    }
+    const RuntimeChildList childList = object->GetChildren();
+    children.reserve(childList.size());
+    for (const RuntimeChildView& child : childList) {
+        const RemoteObjectHandle childHandle = impl_->registerObject(child.object);
+        if (childHandle != 0) {
+            children.emplace_back(child.name, childHandle);
+        }
+    }
+    return children;
+}
+
 std::uint64_t RuntimeSession::SubscribeEvent(RemoteObjectHandle handle, RuntimeEventTypeView type,
                                              RemoteEventCallback callback) {
     if (!impl_->open || !callback) {

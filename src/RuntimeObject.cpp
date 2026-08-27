@@ -1,10 +1,15 @@
 #include <iobject/Runtime.hpp>
 
+#include "ThreadAffinity.hpp"
+
+#include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <map>
 #include <memory>
 #include <set>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -13,6 +18,18 @@ namespace {
 
 bool isSingleChildName(const std::string& name) {
     return !name.empty() && name.find('.') == std::string::npos;
+}
+
+// 线程亲和断言：循环运行期间，IRuntimeObject 操作必须在循环线程执行。
+// 仅在 Debug（未定义 NDEBUG）下生效；Release 下为空操作。
+void assertLoopThread() {
+#ifndef NDEBUG
+    const std::thread::id loop = detail::loopThread();
+    if (loop != std::thread::id() && loop != std::this_thread::get_id()) {
+        std::fprintf(stderr, "[IObject] 线程亲和断言失败：IRuntimeObject 操作必须在循环线程执行\n");
+        std::abort();
+    }
+#endif
 }
 
 class RuntimeObject;
@@ -263,14 +280,23 @@ class RuntimeObject final : public IRuntimeObject {
 public:
     RuntimeObject(detail::RuntimeObjectBridge bridge, RuntimeTopology* topology)
         : lifetime_(std::move(bridge.lifetime)), object_(bridge.object), types_(bridge.types),
-          readData_(std::move(bridge.readData)), writeData_(std::move(bridge.writeData)), topology_(topology) {}
+          readData_(std::move(bridge.readData)), writeData_(std::move(bridge.writeData)),
+          invoke_(std::move(bridge.invoke)), bindRuntime_(std::move(bridge.bindRuntime)),
+          topology_(topology) {}
 
     ~RuntimeObject() override {
+        if (bindRuntime_) {
+            try {
+                bindRuntime_(object_, nullptr);  // 解绑：原生对象清空 self 指针。
+            } catch (...) {
+            }
+        }
         releaseInternal();
     }
 
     RuntimeSubscription SubscribeEvent(IRuntimeObject* source, RuntimeEventTypeView type,
                                        EventHandler handler) override {
+        assertLoopThread();
         source = resolveRuntimeObject(source);
         return state_ == RuntimeObjectState::Active
             ? topology_->addEventHandler(this, source, type, std::move(handler))
@@ -278,11 +304,13 @@ public:
     }
 
     RuntimeSubscription SubscribeChannel(IRuntimeObject* source, DataChannelView channel) override {
+        assertLoopThread();
         return SubscribeChannel(source, channel, channel);
     }
 
     RuntimeSubscription SubscribeChannel(IRuntimeObject* source, DataChannelView sourceChannel,
                                          DataChannelView targetChannel) override {
+        assertLoopThread();
         return state_ == RuntimeObjectState::Active
             ? topology_->subscribeChannel(source, sourceChannel, this, targetChannel)
             : RuntimeSubscription();
@@ -290,6 +318,7 @@ public:
 
     void Publish(RuntimeEventTypeView type, IRuntimeObject* data,
                  bool destroyDataAfterPublish) override {
+        assertLoopThread();
         std::unique_ptr<IRuntimeObject> ownedData(destroyDataAfterPublish ? data : nullptr);
         if (state_ == RuntimeObjectState::Active && !type.empty()) {
             publishEvent({RuntimeEventType(type), this, data});
@@ -297,10 +326,12 @@ public:
     }
 
     void Release() noexcept override {
+        assertLoopThread();
         releaseInternal();
     }
 
     bool ReadData(DataChannelView channel, DataReceiver receiver) const override {
+        assertLoopThread();
         if (state_ != RuntimeObjectState::Active || channel.empty() || !receiver || !readData_) {
             return false;
         }
@@ -308,13 +339,23 @@ public:
     }
 
     bool WriteData(DataChannelView channel, ByteInput data) override {
+        assertLoopThread();
         if (state_ != RuntimeObjectState::Active || channel.empty() || !writeData_) {
             return false;
         }
         return writeData_(object_, channel, data);
     }
 
+    bool Invoke(MethodView method, ByteInput args, DataReceiver result) override {
+        assertLoopThread();
+        if (state_ != RuntimeObjectState::Active || method.empty() || !result || !invoke_) {
+            return false;
+        }
+        return invoke_(object_, method, args, std::move(result));
+    }
+
     bool Connect(std::string name, IRuntimeObject* child, bool overwrite) override {
+        assertLoopThread();
         child = resolveRuntimeObject(child);
         if (state_ != RuntimeObjectState::Active || !isSingleChildName(name)
             || child == nullptr || !canConnectTo(child)) {
@@ -344,6 +385,7 @@ public:
     }
 
     bool Disconnect(const std::string& name) override {
+        assertLoopThread();
         if (state_ != RuntimeObjectState::Active || !isSingleChildName(name)) {
             return false;
         }
@@ -356,6 +398,7 @@ public:
     }
 
     IRuntimeObject* GetChildItem(const std::string& path) override {
+        assertLoopThread();
         if (state_ != RuntimeObjectState::Active || path.empty()) {
             return nullptr;
         }
@@ -387,6 +430,7 @@ public:
     }
 
     const IRuntimeObject* GetChildItem(const std::string& path) const override {
+        assertLoopThread();
         if (state_ != RuntimeObjectState::Active || path.empty()) {
             return nullptr;
         }
@@ -418,6 +462,7 @@ public:
     }
 
     RuntimeChildList GetChildren() const override {
+        assertLoopThread();
         return state_ == RuntimeObjectState::Active ? topology_->getChildren(this) : RuntimeChildList();
     }
 
@@ -502,6 +547,8 @@ private:
     const detail::TypeDescription* types_ = nullptr;
     std::function<bool(const void*, DataChannelView, DataReceiver)> readData_;
     std::function<bool(void*, DataChannelView, ByteInput)> writeData_;
+    std::function<bool(void*, MethodView, ByteInput, DataReceiver)> invoke_;
+    std::function<void(void*, IRuntimeObject*)> bindRuntime_;
     RuntimeTopology* topology_;
     RuntimeObjectState state_ = RuntimeObjectState::Active;
 };
@@ -557,6 +604,7 @@ public:
     void Release() noexcept override { Unbind(); released_ = true; }
     bool ReadData(DataChannelView c, DataReceiver r) const override { return target_ ? target_->ReadData(c, std::move(r)) : false; }
     bool WriteData(DataChannelView c, ByteInput d) override { return target_ ? target_->WriteData(c, d) : false; }
+    bool Invoke(MethodView m, ByteInput a, DataReceiver r) override { return target_ ? target_->Invoke(m, a, std::move(r)) : false; }
     bool Connect(std::string n, IRuntimeObject* c, bool o) override { return target_ ? target_->Connect(std::move(n), c, o) : false; }
     bool Disconnect(const std::string& n) override { return target_ ? target_->Disconnect(n) : false; }
     IRuntimeObject* GetChildItem(const std::string& p) override { return target_ ? target_->GetChildItem(p) : nullptr; }
@@ -1062,7 +1110,13 @@ bool isRuntimeSubscriptionActive(void* control, std::size_t id) noexcept {
 }
 
 IRuntimeObject* createRuntimeObject(RuntimeObjectBridge bridge) {
-    return new RuntimeObject(std::move(bridge), runtimeTopology());
+    void* object = bridge.object;
+    auto bindRuntime = bridge.bindRuntime;  // 拷贝一份供构造后绑定；原值移入节点供析构解绑。
+    std::unique_ptr<IRuntimeObject> node(new RuntimeObject(std::move(bridge), runtimeTopology()));
+    if (bindRuntime) {
+        bindRuntime(object, node.get());  // 节点构造完成后才回调，避免 this 逃逸。
+    }
+    return node.release();
 }
 
 IRuntimeObjectPointer* createRuntimeObjectPointer(IRuntimeObject* initialObject) {

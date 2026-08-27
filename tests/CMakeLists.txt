@@ -14,6 +14,22 @@ add_executable(test_runtime_session_data RuntimeSessionDataTest.cpp)
 target_link_libraries(test_runtime_session_data PRIVATE IObject::IObject)
 add_test(NAME runtime_session_data COMMAND test_runtime_session_data)
 
+add_executable(test_runtime_session_invoke RuntimeSessionInvokeTest.cpp)
+target_link_libraries(test_runtime_session_invoke PRIVATE IObject::IObject)
+add_test(NAME runtime_session_invoke COMMAND test_runtime_session_invoke)
+
+add_executable(test_runtime_self_binding RuntimeSelfBindingTest.cpp)
+target_link_libraries(test_runtime_self_binding PRIVATE IObject::IObject)
+add_test(NAME runtime_self_binding COMMAND test_runtime_self_binding)
+
+add_executable(test_executor_run ExecutorRunTest.cpp)
+target_link_libraries(test_executor_run PRIVATE IObject::IObject)
+add_test(NAME executor_run COMMAND test_executor_run)
+
+add_executable(test_affinity_assert AffinityAssertTest.cpp)
+target_link_libraries(test_affinity_assert PRIVATE IObject::IObject)
+add_test(NAME affinity_assert COMMAND test_affinity_assert)
+
 add_executable(test_runtime_session_event RuntimeSessionEventTest.cpp)
 target_link_libraries(test_runtime_session_event PRIVATE IObject::IObject)
 add_test(NAME runtime_session_event COMMAND test_runtime_session_event)
@@ -41,6 +57,11 @@ add_executable(test_runtime_bridge_protocol_data RuntimeBridgeProtocolDataTest.c
 target_link_libraries(test_runtime_bridge_protocol_data PRIVATE IObject::IObject)
 target_include_directories(test_runtime_bridge_protocol_data PRIVATE ${CMAKE_SOURCE_DIR}/third_party/msgpack11)
 add_test(NAME runtime_bridge_protocol_data COMMAND test_runtime_bridge_protocol_data)
+
+add_executable(test_runtime_bridge_protocol_invoke RuntimeBridgeProtocolInvokeTest.cpp)
+target_link_libraries(test_runtime_bridge_protocol_invoke PRIVATE IObject::IObject)
+target_include_directories(test_runtime_bridge_protocol_invoke PRIVATE ${CMAKE_SOURCE_DIR}/third_party/msgpack11)
+add_test(NAME runtime_bridge_protocol_invoke COMMAND test_runtime_bridge_protocol_invoke)
 
 add_executable(test_runtime_bridge_protocol_event RuntimeBridgeProtocolEventTest.cpp)
 target_link_libraries(test_runtime_bridge_protocol_event PRIVATE IObject::IObject)

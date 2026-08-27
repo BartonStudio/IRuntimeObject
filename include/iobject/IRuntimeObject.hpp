@@ -27,6 +27,8 @@ using RuntimeEventType = std::string;
 using RuntimeEventTypeView = std::string_view;
 using DataChannel = std::string;
 using DataChannelView = std::string_view;
+using Method = std::string;
+using MethodView = std::string_view;
 using ByteView = std::span<const std::uint8_t>;
 using ByteInput = std::span<const std::uint8_t>;
 using DataReceiver = std::function<void(ByteView)>;
@@ -203,6 +205,13 @@ public:
     /// 成功只表示原生对象接受并处理了输入，不会自动发布 DataChannelChanged。
     /// 数据变化后的通知由业务方通过 Publish(RuntimeEventTypes::DataChannelChanged, ...) 显式完成。
     virtual bool WriteData(DataChannelView channel, ByteInput data) = 0;
+
+    /// 调用对象暴露的命名方法（命令/动作）。method 是业务方法名，args 是不透明参数字节。
+    /// 成功时 result 恰好一次回调（空字节表示无返回值）；返回 true 表示方法存在且已执行。
+    /// 框架不解释 args/result 内容，也不会自动发布任何事件——命令引发的状态变化由业务方
+    /// 显式 Publish(RuntimeEventTypes::DataChannelChanged, ...) 完成。
+    /// 空 method、空 result、无调用能力或已 Release 返回 false。
+    virtual bool Invoke(MethodView method, ByteInput args, DataReceiver result) = 0;
 
     /// name 必须是非空且不含 '.' 的单层名称；child 为 nullptr、自环或会形成间接环时返回 false。
     /// child 若为 IRuntimeObjectPointer，会在本次调用解引用其当前绑定目标；空指针节点不能建立连接。

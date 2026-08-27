@@ -7,6 +7,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace iobject {
@@ -44,6 +45,12 @@ public:
 
     bool ReadData(RemoteObjectHandle handle, DataChannelView channel, DataReceiver receiver) const;
     bool WriteData(RemoteObjectHandle handle, DataChannelView channel, ByteInput data);
+    /// 调用远程对象暴露的命名方法；handle 无效、method 为空或对象无此方法时返回 false。
+    /// 成功时 result 恰好一次回调（空字节表示无返回值）；args/result 均为不透明字节。
+    bool Invoke(RemoteObjectHandle handle, MethodView method, ByteInput args, DataReceiver result);
+    /// 返回 handle 下所有直接子节点的 {name, handle} 快照；每个子节点自动登记句柄。
+    /// handle 无效返回空列表。供远程发现（测试工具）使用，后期可能移除。
+    std::vector<std::pair<std::string, RemoteObjectHandle>> GetChildren(RemoteObjectHandle handle);
 
     /// 对应 JS obj.SubscribeEvent(type, handler)；返回会话内订阅 ID，0 表示失败。
     /// 回调在 C++ 事件同步派发期间执行，不得向框架抛出异常。

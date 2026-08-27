@@ -65,6 +65,10 @@ struct Loopback {
                                   {"addr", MsgPack(addr)},
                                   {"childId", MsgPack(childId)}}));
     }
+
+    MsgPack getChildren(std::uint64_t addr) {
+        return roundtrip(request({{"op", MsgPack("GetChildren")}, {"addr", MsgPack(addr)}}));
+    }
 };
 
 std::string errorCode(const MsgPack& response) {
@@ -105,6 +109,32 @@ int main() {
         // childId 含 '.' 或为空：MalformedMessage（协议规定 childId 是单层名称）。
         TEST_CHECK(errorCode(loop.getChildItem(loop.root, "Player.Decoder")) == "MalformedMessage");
         TEST_CHECK(errorCode(loop.getChildItem(loop.root, "")) == "MalformedMessage");
+
+        // GetChildren 枚举：root -> [Player]
+        const MsgPack rootChildren = loop.getChildren(loop.root);
+        TEST_CHECK(rootChildren["ok"].bool_value());
+        TEST_CHECK(rootChildren["children"].is_array());
+        const MsgPack::array& rootList = rootChildren["children"].array_items();
+        TEST_CHECK(rootList.size() == 1);
+        TEST_CHECK(rootList[0]["name"].string_value() == "Player");
+        TEST_CHECK(rootList[0]["addr"].int64_value() > 0);
+
+        // player -> [Decoder]
+        const MsgPack playerChildren = loop.getChildren(playerAddr);
+        TEST_CHECK(playerChildren["ok"].bool_value());
+        const MsgPack::array& playerList = playerChildren["children"].array_items();
+        TEST_CHECK(playerList.size() == 1);
+        TEST_CHECK(playerList[0]["name"].string_value() == "Decoder");
+
+        // decoder（叶子）-> 空 children
+        const std::uint64_t decoderAddr =
+            static_cast<std::uint64_t>(decoderResponse["addr"].int64_value());
+        const MsgPack leafChildren = loop.getChildren(decoderAddr);
+        TEST_CHECK(leafChildren["ok"].bool_value());
+        TEST_CHECK(leafChildren["children"].array_items().empty());
+
+        // addr 无效 -> AddrInvalid
+        TEST_CHECK(errorCode(loop.getChildren(999999)) == "AddrInvalid");
 
         delete player;  // decoder 随 player 的拓扑解除而独立存活，稍后删除。
     }

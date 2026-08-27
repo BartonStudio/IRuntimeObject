@@ -4,7 +4,7 @@
 
 ## 1. 公开边界
 
-`IObject` 是 C++20 静态库。安装后有以下六个公共头：
+`IObject` 是 C++20 静态库。安装后有以下七个公共头：
 
 - `<iobject/IRuntimeObject.hpp>`：对象拓扑、结构事件、`As<T>()` 查询与不透明数据通道读写契约；
 - `<iobject/IRuntimeObjectPointer.hpp>`：可换绑透明指针节点契约；
@@ -12,6 +12,7 @@
 - `<iobject/RuntimeDomain.hpp>`：运行时域契约，自动持有唯一根锚点与桥接入口；
 - `<iobject/RuntimeBridge.hpp>`：`RuntimeBridgeRoot` 与 `RuntimeSession` 远程桥接模型（不含传输与协议）。
 - `<iobject/RuntimeBridgeProtocol.hpp>`：MessagePack 协议适配器 `RuntimeBridgePeer`，把一个传输连接映射到一个 `RuntimeSession`（编解码使用 vendored 的 msgpack11，位于 `third_party/msgpack11/`）。
+- `<iobject/Executor.hpp>`：线程模型抽象 `Executor`、默认单线程实现 `SingleThreadExecutor` 及环境式事件循环入口（`Run`/`Post`/`Stop`/`IsOnLoopThread`/`UseExecutor`）。
 
 `RuntimeObject` 是静态库 `src` 中的私有实现，不是公共类型，调用方不得包含或依赖它。`Runtime` 工厂以 `IRuntimeObject*` 返回节点；调用方负责对每个返回节点执行 `delete`。`Connect` 仅保存非拥有拓扑边，调用方管理节点生命周期。
 
@@ -30,6 +31,9 @@
 | `RuntimeSession` | 一个远程连接对应的会话，持有句柄表与订阅表。 |
 | `addr` | 协议中的对象标识，即 `RemoteObjectHandle`：对象指针的数值形式，同对象跨会话同值。 |
 | `RuntimeBridgePeer` | MessagePack 协议适配器，把一个传输连接映射到一个会话。 |
+| `Executor` | 线程模型的统一抽象：保证已投递任务串行执行；业务代码不依赖具体模型。 |
+| 事件循环 / 循环线程 | `Run()` 阻塞的那个线程；框架业务在该线程上串行执行，空闲时睡眠等待。 |
+| 线程亲和断言 | Debug 下的检查：循环运行期间，`IRuntimeObject` 操作必须在循环线程执行。 |
 
 ## 3. Runtime 创建与承载规则
 
@@ -43,13 +47,13 @@
 - `Runtime::makePointer()`：创建未绑定的 `IRuntimeObjectPointer`；
 - `Runtime::makePointer(IRuntimeObject*)`：创建后立即尝试绑定目标；目标无效时仍返回未绑定指针节点。
 
-普通节点的 `Release()` 解除节点的全部拓扑关系及其相关事件、数据通道订阅关系，不释放运行时节点或承载的原生对象。节点被调用方 `delete` 时，承载的原生对象才按相应持有策略处理。当前尚未提供 `DeleteLater` 或统一事件循环；未来若引入单线程事件循环，将由延迟删除机制处理回调栈中的销毁请求。
+普通节点的 `Release()` 解除节点的全部拓扑关系及其相关事件、数据通道订阅关系，不释放运行时节点或承载的原生对象。节点被调用方 `delete` 时，承载的原生对象才按相应持有策略处理。框架已提供单线程事件循环（`Executor`，见第 6 节）与线程亲和断言，但尚未提供 `DeleteLater` 延迟删除机制；后者作为事件循环之上的后续能力，用于处理回调栈中的销毁请求。
 
 ### 3.0 运行时调用栈与物理删除时机
 
-当前框架的事件、拓扑操作和数据通道均为同步调用，并允许在回调中重入其他运行时操作。一次最外层 `Publish`、`Connect`、`Disconnect`、`ReadData` 或 `WriteData`，连同其同步触发的事件、数据回调、`SubscribeChannel` 传播及嵌套调用，共同构成一个运行时调用范围。
+当前框架的事件、拓扑操作和数据通道均为同步调用，并允许在回调中重入其他运行时操作。一次最外层 `Publish`、`Connect`、`Disconnect`、`ReadData`、`WriteData` 或 `Invoke`，连同其同步触发的事件、数据回调、`SubscribeChannel` 传播及嵌套调用，共同构成一个运行时调用范围。
 
-运行时调用范围尚未返回时，不得直接物理 `delete` 可能仍被本次调用访问的 `IRuntimeObject` 节点。特别是事件处理器、`ReadData` 接收器、原生对象的 `WriteData` 实现、拓扑事件回调和同步传播过程中，都不应删除当前或相关拓扑/同步组成员；否则快照中的非拥有指针可能立即变成悬垂指针，导致未定义行为或同步只完成部分成员。
+运行时调用范围尚未返回时，不得直接物理 `delete` 可能仍被本次调用访问的 `IRuntimeObject` 节点。特别是事件处理器、`ReadData` 接收器、原生对象的 `WriteData` / `Invoke` 实现、拓扑事件回调和同步传播过程中，都不应删除当前或相关拓扑/同步组成员；否则快照中的非拥有指针可能立即变成悬垂指针，导致未定义行为或同步只完成部分成员。
 
 安全删除至少需要同时满足：
 
@@ -57,7 +61,7 @@
 2. 节点已经不再需要参与拓扑、订阅、数据同步或其他业务访问；
 3. 调用方确认自己拥有该节点的唯一物理删除责任，且没有其他代码仍持有并访问它。
 
-在当前模型中，业务方如需在回调栈中释放节点，应先记录待处理节点，等最外层运行时调用返回后，再执行 `Release()` 和 `delete`。未来设计单线程事件循环时，应增加 `DeleteLater` 一类的延迟删除机制：它只提交销毁请求，由事件循环在当前任务及其嵌套调用结束后执行 `Release()` 与物理 `delete`。该机制属于未来能力，当前接口不提供。
+在当前模型中，业务方如需在回调栈中释放节点，应先记录待处理节点，等最外层运行时调用返回后，再执行 `Release()` 和 `delete`。事件循环（第 6 节）之上应增加 `DeleteLater` 一类的延迟删除机制：它只提交销毁请求，由事件循环在当前任务及其嵌套调用结束后执行 `Release()` 与物理 `delete`。该机制属于未来能力，当前接口不提供。
 
 `Release()` 与 `delete` 始终是两个不同动作：`Release()` 负责退出 IRuntimeObject 系统，`delete` 负责销毁 C++ 节点及其按持有策略管理的原生对象。未来延迟删除所需的“待处理”状态是运行时内部调度细节，不作为当前公开 `Release()` 状态的一部分；当前不新增任何 `Queued` 枚举或相关接口。
 
@@ -65,7 +69,7 @@
 
 `IRuntimeObjectPointer` 是不拥有目标生命周期的可换绑节点。它通过 `Bind(IRuntimeObject*)` 绑定普通活动运行时节点，`Unbind()` 解除绑定，`GetBindObject()` 读取当前目标，`IsBound()` 查询状态；`Bind(nullptr)` 等同于 `Unbind()` 并成功。第一版拒绝绑定自身、另一指针节点、已 Release 的节点及不同运行时拓扑中的节点。
 
-已绑定指针在**调用当次**透明转发 `SubscribeEvent`、`Publish`、数据通道和拓扑查询/操作到目标；未绑定时返回对应失败或空结果，不缓存操作。指针不维护自己的处理器、订阅或拓扑边，换绑不会迁移或撤销先前经它建立在旧目标上的关系，调用方须自行管理 `RuntimeSubscription` 句柄。`Publish` 的 `data` 始终是事件载荷而非目标参数，不会被解引用；未绑定指针收到 `Publish(type, data, true)` 时事件不转发，但仍按接管语义 `delete data`。
+已绑定指针在**调用当次**透明转发 `SubscribeEvent`、`Publish`、`Invoke`、数据通道和拓扑查询/操作到目标；未绑定时返回对应失败或空结果，不缓存操作。指针不维护自己的处理器、订阅或拓扑边，换绑不会迁移或撤销先前经它建立在旧目标上的关系，调用方须自行管理 `RuntimeSubscription` 句柄。`Publish` 的 `data` 始终是事件载荷而非目标参数，不会被解引用；未绑定指针收到 `Publish(type, data, true)` 时事件不转发，但仍按接管语义 `delete data`。
 
 `pointer->As<IRuntimeObjectPointer>()` 返回指针节点自身；其余 `pointer->As<T>()` 在已绑定时查询当前目标。普通节点将 pointer 用作 `Connect` 的 child 或 `SubscribeEvent` 的 source 参数时，也只在该次调用解引用当前目标：空指针节点失败，既有边与订阅不会随之后的 `Bind()` 改变。
 
@@ -116,6 +120,8 @@ bool WriteData(iobject::DataChannelView channel,
 
 两项能力相互独立：只实现读取、只实现写入或均不实现都不影响包装、拓扑、事件和 `As<T>()`。纯运行时节点、已 `Release()` 的节点、空通道、未实现对应能力、未知通道或原生类主动拒绝操作时，接口返回 `false`。`ReadData` 返回 `true` 表示同步调用接收器恰好一次，传入空 `ByteView` 同样是有效的成功结果；`WriteData` 返回 `true` 只表示原生对象已同步接受并处理输入，不承诺数据必然发生变化。
 
+原生类还可选择实现可选钩子 `void BindRuntime(iobject::IRuntimeObject* self)`：框架在节点构造完成后以节点指针回调一次（绑定），并在节点析构前以 `nullptr` 再回调一次（解绑）。它让原生对象无需外部注入回调即可持有自身节点指针，从而直接 `self->Publish(...)`、`self->SubscribeEvent(...)` 等。持有（`make`/`share`）包装下对象与节点同生共死，`self` 全程有效；非持有（`ref`/`fromPtr`）包装下对象可能比节点长寿，对象应在解绑回调中清空保存的指针，解绑后不得继续使用。
+
 `ByteView` 只在读取接收器调用期间有效；需要长期保留时，调用方必须在回调中复制字节，不能保存 `data()` 指针或视图。`ByteInput` 也只在 `WriteData` 当前调用期间有效；原生类若要长期保存输入必须自行复制。原生类自行决定数据组成与编码，框架不解释其内容。不要通过 `reinterpret_cast` 直接把含指针、`std::string`、容器或虚表的 C++ 对象内存暴露为跨边界数据。
 
 数据读写与变化通知是刻意分离的两个业务动作。框架不会因业务直接调用 `WriteData` 返回成功而自动发布事件，也不会验证数据是否真实变化；原生对象在自身运行中直接修改成员变量时同样不会被框架自动感知。业务方确认某通道发生需要观察者处理的逻辑变化后，应显式发布：
@@ -158,7 +164,25 @@ iobject::SubscribeChannel(source, sourceChannel, target, targetChannel);
 
 `RuntimeSubscription` 的析构和幂等 `Cancel()` 均会解除通道订阅；源或目标 `Release` / 析构时也会自动解除，失效句柄的 `IsActive()` 返回 `false`。`SubscribeEvent` 与 `SubscribeChannel` 共用这一句柄模型。普通事件订阅者仍可在收到 `DataChannelChanged` 后自行检查通道并按需 `ReadData`；框架不直接向它们推送字节，不缓存数据，也没有版本号、错误对象或后台队列。原生读写逻辑、读取接收器和事件处理器抛出的 C++ 异常保持原样向调用方传播，异常策略由业务代码负责。
 
-### 3.5 数据通道后续演进（未来设计）
+### 3.5 方法调用（Invoke）
+
+`IRuntimeObject::Invoke(MethodView method, ByteInput args, DataReceiver result)` 提供同步、定向、命名的"命令/动作"调用：`method` 是业务方法名，`args` 与 `result` 均为不透明字节，框架不解释内容。它与数据通道（状态）和事件（通知）正交，是对象暴露"行为"的入口。
+
+原生类可选择实现同名成员函数，从而在被 `Runtime` 包装时自动接入：
+
+```cpp
+bool Invoke(iobject::MethodView method,
+            iobject::ByteInput args,
+            iobject::DataReceiver result);
+```
+
+返回 `true` 表示方法存在且已执行，`result` 恰好一次回调（空字节表示无返回值）；返回 `false` 表示空 `method`、空 `result`、无调用能力、已 `Release()` 或原生类拒绝该方法。`args`/`result` 与数据通道一样仅在本次调用期间有效，需长期保留时原生类必须自行复制。
+
+方法与数据、事件刻意分离，构成三条正交通道：`result` 字节是命令的"返回值"（点到点、同步回给调用方），`Publish` 是命令的"副作用/状态变化"（广播给订阅者、可同步可异步），数据通道是"状态"。一个命令可以只用其一、两者都用或都不用；命令引发的状态变化由业务方显式 `Publish(RuntimeEventTypes::DataChannelChanged, ...)` 完成，`Invoke` 自身绝不发布——配合 `BindRuntime`，原生对象可直接经 `self_->Publish(...)` 完成发布。
+
+`Invoke` 是同步原语：处理器在当前调用栈内同步跑完，不得阻塞运行循环。涉及网络/磁盘等 I/O 的业务应把工作交给 worker 线程、立即返回"受理回执"，完成后经回投回到循环线程提交结果并发布；回投机制当前不在框架内，属于后续演进。
+
+### 3.6 数据通道后续演进（未来设计）
 
 当前本地同步保持同步、逐次、无状态：一次变化会立即读取源通道并写入目标，不保存字节、不压缩连续变化，也不向后台提交任务。以下能力尚未实现；`SubscribeChannel` 只是未来远程能力可复用的本地基础：
 
@@ -198,7 +222,7 @@ delete root;
 - 其他事件的 `RuntimeObjectEvent::source` 也只应在处理器执行期间使用；
 - 订阅关系直接保存 `EventHandler`，不再拆分本地处理器表与对象间观察关系；`SubscribeEvent(source, type, handler)` 原子建立一条订阅并返回可移动且不可复制的 `RuntimeSubscription`。句柄析构自动取消，也可调用幂等的 `Cancel()`；任一端 `Release` 或 `delete` 都会自动解绑，失效句柄的 `IsActive()` 返回 `false`；
 - 发布按事件源和类型查找订阅快照，并同步执行各订阅保存的回调；没有登记回调的对象不会形成有效订阅，事件直接丢弃，不保存收件箱或队列；
-- 处理器按 ID 顺序快照执行，处理器中增删处理器或取消订阅不破坏当前派发；普通 `Publish`、`Connect`、`Disconnect` 不捕获处理器异常，处理器不得向框架抛出 C++ 异常；`Release` / 析构路径仅为析构安全而吞掉异常。当前仍假定单线程事件循环，不是全局事件总线，也没有异步队列；
+- 处理器按 ID 顺序快照执行，处理器中增删处理器或取消订阅不破坏当前派发；普通 `Publish`、`Connect`、`Disconnect` 不捕获处理器异常，处理器不得向框架抛出 C++ 异常；`Release` / 析构路径仅为析构安全而吞掉异常。框架核心仍假定单线程访问（不自动把操作投递到事件循环；`Executor` 与线程亲和断言见第 6 节），不是全局事件总线，也没有内置异步队列；
 - 同一最外层事件及其同步嵌套发布共享私有派发上下文。若当前活跃路径重复出现相同的 `(事件源指针, 事件类型)`，框架输出诊断并截断该次待发布事件；不禁止自订阅或双向订阅；
 - 同一事件链最大嵌套发布深度为 32、最大成功发布次数为 128。第 33 层或第 129 次待发布事件会向 `std::cerr` 输出中文诊断并被截断；此前已完成的派发不回滚，调用正常返回。
 
@@ -213,7 +237,7 @@ delete root;
 
 ### 5.2 会话与句柄
 
-- `RuntimeSession` 由 `RuntimeBridgeRoot::OpenSession()` 创建（根锚点不可用时返回 `nullptr`），方法对应远程端接口：`RootObject()`（根锚点句柄）、`ResolveRootChild`（对应 JS `runtime.Root.GetChildItem`）、`ResolveChild`、`ReadData`/`WriteData`、`SubscribeEvent`/`CancelEvent`、`HasObject`、`Close`/`IsOpen`。
+- `RuntimeSession` 由 `RuntimeBridgeRoot::OpenSession()` 创建（根锚点不可用时返回 `nullptr`），方法对应远程端接口：`RootObject()`（根锚点句柄）、`ResolveRootChild`（对应 JS `runtime.Root.GetChildItem`）、`ResolveChild`、`ReadData`/`WriteData`、`Invoke`、`SubscribeEvent`/`CancelEvent`、`HasObject`、`Close`/`IsOpen`。
 - 会话为被引用对象登记 `RemoteObjectHandle`（协议中称 `addr`），取对象指针的数值形式：同一对象在任何会话中都是同一数值，经多条路径到达也返回同一句柄；未在本会话登记或已失效的数值不会被解析。句柄 `0` 是无效哨兵值：解析未命中、无效句柄参数、会话关闭后的查询均返回 `0`。对象 `Release` 或析构后句柄立即失效；会话关闭时全部句柄与订阅失效。
 - 会话经一个私有中继节点登记全部远程订阅（满足订阅者必须是 `IRuntimeObject` 的既有规则）；对象 `Release` 时远程订阅者能收到 `Released` 通知。
 - 事件消息不传输通用载荷；`DataChannelChanged` 事件在派发当次对源对象 `ReadData` 成功时携带该通道的字节快照（读失败则不带，远程端回退主动拉取）。
@@ -221,12 +245,53 @@ delete root;
 ### 5.3 消息协议与适配器
 
 - `RuntimeBridgePeer` 把一个传输连接映射到一个 `RuntimeSession`：传输层每收到一条完整 MessagePack 消息就调用 `ReceiveMessage`，适配器把请求翻译成 `RuntimeSession` 调用，经 `SendCallback` 发回响应帧与事件帧；帧字节仅在 `SendCallback` 调用期间有效。真实传输层（WebSocket 等）未实现，接入时只需把收发接到这两个点。
-- 协议操作集：`Connect`、`GetChildItem`（`childId` 为非空单层名称，响应回显 `childId` 并返回子对象 `addr`）、`ReadData`/`WriteData`（`data` 为 MessagePack bin）、`SubscribeEvent`/`CancelEvent`、`Close`（传输断开等价隐式 `Close`）。`Connect` 是握手：域名由传输集成方在构造 `RuntimeBridgePeer` 时传入（`RuntimeDomain` 本身没有名字属性），请求域名不匹配时回 `DomainNotFound` 并关闭连接，成功则返回根锚点 `addr`；其余握手失败（畸形请求、重复 `Connect`）只回错不关闭连接。
+- 协议操作集：`Connect`、`GetChildItem`（`childId` 为非空单层名称，响应回显 `childId` 并返回子对象 `addr`）、`ReadData`/`WriteData`（`data` 为 MessagePack bin）、`Invoke`（`method` 为字符串，`args`/`result` 为 MessagePack bin，失败回 `OperationFailed`）、`SubscribeEvent`/`CancelEvent`、`Close`（传输断开等价隐式 `Close`）。`Connect` 是握手：域名由传输集成方在构造 `RuntimeBridgePeer` 时传入（`RuntimeDomain` 本身没有名字属性），请求域名不匹配时回 `DomainNotFound` 并关闭连接，成功则返回根锚点 `addr`；其余握手失败（畸形请求、重复 `Connect`）只回错不关闭连接。
 - 下行事件帧含 `event`/`subscription`/`addr`/`channel`，客户端凭 `subscription` 精确分发；没有订阅者的事件不产生帧。`DataChannelChanged` 事件额外携带可选 `data` 字段（变化当次的通道字节快照）。
 - 错误以 `{ok:false, error:{code, message}}` 返回；错误码全集：`MalformedMessage`、`UnknownOp`、`DomainNotFound`、`SessionNotEstablished`、`ObjectNotFound`、`AddrInvalid`、`SubscriptionInvalid`、`OperationFailed`。单条消息上限 1 MiB，超过回 `MalformedMessage` 并关闭连接。协议无版本概念，未识别字段一律忽略。完整消息格式见 `docs/superpowers/specs/2026-08-18-runtime-bridge-messagepack-protocol-design.md`。
 - MessagePack 编解码由 vendored 的 msgpack11（`third_party/msgpack11/`，MIT）提供，随静态库编译。
 
-## 6. 构建、安装与使用
+## 6. 事件循环与线程模型
+
+框架提供环境式事件循环与可插拔线程模型，用于把 `IRuntimeObject` 业务串行到单个"循环线程"上执行，避免多线程并发冲突。它与业务代码解耦：业务仍是同步调用，框架核心不自动把操作投递到事件循环。
+
+### 6.1 执行器抽象
+
+`Executor` 是线程模型的统一抽象，唯一契约是"已投递任务串行执行"（一次一个、FIFO）：
+
+```cpp
+class Executor {
+public:
+    virtual void Post(std::function<void()> task) = 0;   // 任意线程投递
+    virtual void Run() = 0;                               // 阻塞当前线程跑循环
+    virtual void Stop() noexcept = 0;                     // 请求停止
+    virtual bool IsOnExecutionThread() const = 0;         // 是否在循环线程
+    virtual bool Drain() { return false; }                // 宿主自有循环集成用
+};
+```
+
+### 6.2 默认单线程模型
+
+`SingleThreadExecutor` 是默认实现：`Run()` 阻塞调用线程（通常就是 `main`），空闲时在条件变量上睡眠等待、不空转；`Post()` 任意线程投递并唤醒；`Stop()` 执行完当前任务后返回、丢弃剩余排队任务。
+
+### 6.3 环境式入口
+
+业务与外部类只认几个自由函数，不认具体线程模型；不设置线程模型时使用懒初始化的 `SingleThreadExecutor`：
+
+```cpp
+void Run();                              // 阻塞跑循环
+void Post(std::function<void()> task);   // 任意线程投递
+void Stop() noexcept;                    // 请求停止
+bool IsOnLoopThread();                   // 是否在循环线程
+void UseExecutor(std::unique_ptr<Executor> executor);  // 换线程模型（须在 Run 前调用）
+```
+
+### 6.4 不自动投递与线程亲和
+
+框架核心（`Connect`/`Publish`/`ReadData`/`WriteData`/`Invoke`/`SubscribeEvent` 等）**不自动**把操作投递到事件循环，仍在调用线程同步执行；调用方经 `Post` 把跨线程入口（前端消息、worker 结果）投进循环，进入循环后的业务直接同步跑。
+
+为把"靠纪律"升级为"可验证"，框架在 Debug（未定义 `NDEBUG`）下于全部公开运行时操作入口（`Connect`/`Disconnect`/`SubscribeEvent`/`SubscribeChannel`/`Publish`/`Release`/`ReadData`/`WriteData`/`Invoke`/`GetChildItem`/`GetChildren`，共 13 处）做线程亲和断言：事件循环正在运行（循环线程非空）且当前线程不是循环线程时，向 `stderr` 输出诊断并 `abort()`；循环线程为空（未 `Run`）时放行，故现有单线程同步代码零影响；Release 下断言被编译掉、零开销。
+
+## 7. 构建、安装与使用
 
 构建目标是 `IObject`，项目内可使用别名 `IObject::IObject`。安装会导出 CMake 包，外部项目可使用：
 
@@ -235,9 +300,9 @@ find_package(IObject CONFIG REQUIRED)
 target_link_libraries(client PRIVATE IObject::IObject)
 ```
 
-安装内容仅包括静态库、上述六个头文件和 CMake package 配置。内部工厂桥接位于 `iobject::detail`，仅为模板门面链接静态库所需，调用方不应直接依赖。
+安装内容仅包括静态库、上述七个头文件和 CMake package 配置。内部工厂桥接位于 `iobject::detail`，仅为模板门面链接静态库所需，调用方不应直接依赖。
 
-## 7. 当前拓扑实例与多域演进
+## 8. 当前拓扑实例与多域演进
 
 当前只有一个进程内全局 `RuntimeTopology`（函数局部 `static` 指针指向堆对象，刻意永不析构以规避静态析构顺序问题），所有 `Runtime` 工厂创建的节点均接入该单一全局拓扑。节点创建时会缓存一个非拥有的 `RuntimeTopology* topology_`，后续 `Connect`、`Disconnect`、查询与释放均直接通过该指针访问拓扑；该缓存不改变当前公开 Runtime API、DAG 规则、事件或生命周期。
 
@@ -247,8 +312,8 @@ target_link_libraries(client PRIVATE IObject::IObject)
 
 `RuntimeDomain`、`RuntimeSession` 与协议适配器 `RuntimeBridgePeer` 均已实现第一版，规则见第 5 节。
 
-## 8. 当前边界与后续规划
+## 9. 当前边界与后续规划
 
-当前内核包含：**`IRuntimeObject` 契约 + 私有静态库实现 + `Runtime` 创建门面 + 显式 `As<T>()` 类型转换 + 不透明数据通道读写 + 命名非拥有拓扑 + 对象级结构事件 + 远程桥接（`RuntimeDomain` / `RuntimeSession` / `RuntimeBridgePeer` 协议适配器，无真实传输层）**。
+当前内核包含：**`IRuntimeObject` 契约 + 私有静态库实现 + `Runtime` 创建门面 + 显式 `As<T>()` 类型转换 + 不透明数据通道读写 + 命名方法调用（`Invoke`）+ 命名非拥有拓扑 + 对象级结构事件 + 远程桥接（`RuntimeDomain` / `RuntimeSession` / `RuntimeBridgePeer` 协议适配器，无真实传输层）+ 事件循环与线程模型（`Executor` / `SingleThreadExecutor` + 环境式入口 + Debug 线程亲和断言）**。
 
-恢复动态访问、方法、属性之前，应先定义统一 `Error` / `Result`、稳定对象 ID 与路径、批量变更、来源上下文和线程模型。示例目录 `example/`：`01_WrappingTest` 演示创建方式、承载策略与调用方 `delete` 节点；`02_TopologyTest` 演示拓扑连接与查询；`03_EventTest` 演示事件订阅与发布；`04_TypeConversionTest` 演示 `RegisterTypes` 与 `As<T>()`；`05_DataChannelTest` 演示可选原生 `ReadData`、空数据和失败路径；`06_DataChannelChangeTest` 演示数据变化通知；`07_PointerTest` 演示透明指针节点；`08_SubscribeChannelTest` 演示通道订阅同步；`09_RemoteBridgeTest` 演示域、会话与句柄；`10_MessagePackProtocolTest` 演示协议适配器的进程内回环往返。`example/` 均不是自动化单元测试；自动化测试位于 `tests/`（CTest）。
+命名方法调用（`Invoke`）已实现为最小同步原语：失败统一回 `OperationFailed`，不区分"方法不存在"与"执行失败"，也不携带结构化结果。事件循环已实现为环境式单线程模型（`Executor` / `SingleThreadExecutor`，业务不自动投递）；属性、动态访问、`DeleteLater`、更完整的方法/命令模型（统一 `Error` / `Result`、稳定对象 ID 与路径、批量变更、来源上下文）及更多线程模型实现（`Inline` / `Hosted` / 每域线程池）仍是后续工作。示例目录 `example/`：`01_WrappingTest` 演示创建方式、承载策略与调用方 `delete` 节点；`02_TopologyTest` 演示拓扑连接与查询；`03_EventTest` 演示事件订阅与发布；`04_TypeConversionTest` 演示 `RegisterTypes` 与 `As<T>()`；`05_DataChannelTest` 演示可选原生 `ReadData`、空数据和失败路径；`06_DataChannelChangeTest` 演示数据变化通知；`07_PointerTest` 演示透明指针节点；`08_SubscribeChannelTest` 演示通道订阅同步；`09_RemoteBridgeTest` 演示域、会话与句柄；`10_MessagePackProtocolTest` 演示协议适配器的进程内回环往返；`11_InvokeTest` 演示方法调用（命令）与异步业务；`12_ExecutorTest` 演示事件循环、环境式入口与循环线程上的 IRuntimeObject 业务。`example/` 均不是自动化单元测试；自动化测试位于 `tests/`（CTest）。

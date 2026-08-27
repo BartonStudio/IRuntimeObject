@@ -4,7 +4,7 @@
 
 ## 1. 定位与边界
 
-本协议是 `RuntimeSession` 方法集的消息化包装，遵循 `2026-08-18-runtime-domain-bridge-root-design.md` 的模型：远程端沿根锚点向下发现对象、读写数据通道、订阅事件；不能修改拓扑、不能释放对象、没有 `As<T>`。
+本协议是 `RuntimeSession` 方法集的消息化包装，遵循 `2026-08-18-runtime-domain-bridge-root-design.md` 的模型：远程端沿根锚点向下发现对象、读写数据通道、调用方法、订阅事件；不能修改拓扑、不能释放对象、没有 `As<T>`。
 
 - **编码**：全部消息使用 MessagePack。选它的原因：schema-less、原生 bin 类型（不透明字节通道零膨胀）、有成熟 JS 库。不使用 protobuf（schema 驱动与不透明通道模型冲突），不使用 JSON+Base64（数据膨胀）。
 - **无版本概念**：协议不定义版本字段，不做版本兼容协商。消息中未识别的字段一律忽略（防御性解析，非版本机制）。
@@ -33,7 +33,7 @@
 
 ## 4. 操作消息全集
 
-8 个操作：握手 `Connect` 加 7 个会话操作。
+10 个操作：握手 `Connect` 加 9 个会话操作。
 
 ### 4.1 握手
 
@@ -62,6 +62,17 @@
 
 子对象不存在回 `ObjectNotFound`；`addr` 无效回 `AddrInvalid`。
 
+`GetChildren` 枚举 `addr` 指定对象的**全部直接子节点**（只读发现，供测试工具等使用）：
+
+```text
+→ { "op": "GetChildren", "id": 4, "addr": 1745238901234562 }
+← { "id": 4, "ok": true, "children": [
+      { "name": "Decoder", "addr": 1745238901234563 }
+    ] }
+```
+
+成功返回 `children` 数组（每个元素含 `name` 与 `addr`；无子节点时为空数组）；`addr` 无效回 `AddrInvalid`。
+
 ### 4.3 数据通道
 
 `data` 是 MessagePack bin 类型，原生字节：
@@ -76,7 +87,20 @@
 
 错误区分依赖 `RuntimeSession` 新增的 addr 有效性查询（见第 8 节）：适配器先检查 `addr`，无效回 `AddrInvalid`；有效但 `ReadData`/`WriteData` 返回 `false`（对象拒绝、未知通道等）回 `OperationFailed`。
 
-### 4.4 事件订阅
+### 4.4 方法调用
+
+`Invoke` 调用对象暴露的命名方法（命令/动作）。`method` 是业务方法名（非空），`args` 与 `result` 均为 MessagePack bin 不透明字节；框架不解释内容，也不自动发布任何事件：
+
+```text
+→ { "op": "Invoke", "id": 6, "addr": 1745238901234563, "method": "Refresh", "args": <bin> }
+← { "id": 6, "ok": true, "result": <bin> }
+```
+
+- `result` 成功时恒为 bin，空 bin 表示方法无返回值（框架不区分"无返回值"与"空返回值"）。
+- 命令引发的状态变化由业务方显式 `Publish(DataChannelChanged, ...)` 完成，`Invoke` 本身不发布事件；客户端观察结果要么经 `result`，要么经订阅的事件。
+- 错误区分与数据通道一致：`addr` 无效回 `AddrInvalid`；`method` 为空或 `args` 非 bin 回 `MalformedMessage`；有效但对象拒绝或无此方法回 `OperationFailed`。
+
+### 4.5 事件订阅
 
 ```text
 → { "op": "SubscribeEvent", "id": 6, "addr": 1745238901234563, "type": "DataChannelChanged" }
@@ -88,7 +112,7 @@
 
 同样先做 addr 有效性检查：无效回 `AddrInvalid`；有效但 `RuntimeSession::SubscribeEvent` 返回 0 回 `OperationFailed`；`CancelEvent` 的 `subscription` 无效或已取消回 `SubscriptionInvalid`。
 
-### 4.5 关闭
+### 4.6 关闭
 
 ```text
 → { "op": "Close", "id": 8 }
@@ -133,7 +157,7 @@
 | `ObjectNotFound` | 子对象名称未命中 |
 | `AddrInvalid` | addr 无效、已失效或不属于本会话 |
 | `SubscriptionInvalid` | 订阅 ID 无效或已取消 |
-| `OperationFailed` | 对象操作返回失败（`ReadData`/`WriteData`/`SubscribeEvent` 等） |
+| `OperationFailed` | 对象操作返回失败（`ReadData`/`WriteData`/`Invoke`/`SubscribeEvent` 等） |
 
 ## 7. 连接生命周期
 
@@ -175,3 +199,5 @@ RuntimeSession（已实现）
 - 对象 `Release` 后被内核自动取消的订阅，之后 `CancelEvent` 返回 ok（幂等从简）；`SubscriptionInvalid` 只覆盖从未存在或已被显式取消的 ID。
 - 单条消息上限按建议值实现为 1 MiB，超过回 `MalformedMessage`（`id: 0`）并关闭连接。
 - 事件帧 `channel` 字段仅 `DataChannelChanged` 非空；此类事件在派发当次对源对象 `ReadData` 成功时携带 `data` 字节快照（已实现），通用事件载荷的传输仍未实现。
+- `Invoke`（方法调用）已实现：核心 `IRuntimeObject::Invoke`（同步、定向、字节进出、不自动发布），`Runtime::make<T>` 按鸭子类型自动绑定原生 `Invoke` 成员函数，会话 `RuntimeSession::Invoke`，协议 op `Invoke`（`args`/`result` 为 bin，失败回 `OperationFailed`，不引入新错误码）。
+- `GetChildren`（子节点枚举）已实现：会话 `RuntimeSession::GetChildren` + 协议 op `GetChildren`（响应为 `children` 数组，元素含 `name`/`addr`）。只读发现、不修改拓扑；供测试工具使用，后期可能移除。

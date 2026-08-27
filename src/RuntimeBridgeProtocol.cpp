@@ -124,10 +124,14 @@ struct RuntimeBridgePeer::Impl {
             handleConnect(id, request);
         } else if (op == "GetChildItem") {
             handleGetChildItem(id, request);
+        } else if (op == "GetChildren") {
+            handleGetChildren(id, request);
         } else if (op == "ReadData") {
             handleReadData(id, request);
         } else if (op == "WriteData") {
             handleWriteData(id, request);
+        } else if (op == "Invoke") {
+            handleInvoke(id, request);
         } else if (op == "SubscribeEvent") {
             handleSubscribeEvent(id, request);
         } else if (op == "CancelEvent") {
@@ -161,6 +165,27 @@ struct RuntimeBridgePeer::Impl {
             return;
         }
         sendMessage(okResponse(id, {{"childId", MsgPack(childId)}, {"addr", MsgPack(child)}}));
+    }
+
+    void handleGetChildren(std::uint64_t id, const MsgPack& request) {
+        std::uint64_t addr = 0;
+        if (!asUint64(request["addr"], addr) || addr == 0) {
+            sendMessage(errorResponse(id, "MalformedMessage", "缺少合法的 addr 字段"));
+            return;
+        }
+        if (!session->HasObject(addr)) {
+            sendMessage(errorResponse(id, "AddrInvalid", "addr 无效或已失效"));
+            return;
+        }
+        const auto children = session->GetChildren(addr);
+        MsgPack::array childArray;
+        childArray.reserve(children.size());
+        for (const auto& [name, childAddr] : children) {
+            childArray.push_back(MsgPack(MsgPack::object{
+                {"name", MsgPack(name)},
+                {"addr", MsgPack(childAddr)}}));
+        }
+        sendMessage(okResponse(id, {{"children", MsgPack(std::move(childArray))}}));
     }
 
     void handleReadData(std::uint64_t id, const MsgPack& request) {
@@ -211,6 +236,37 @@ struct RuntimeBridgePeer::Impl {
             return;
         }
         sendMessage(okResponse(id));
+    }
+
+    void handleInvoke(std::uint64_t id, const MsgPack& request) {
+        std::uint64_t addr = 0;
+        std::string method;
+        if (!asUint64(request["addr"], addr) || addr == 0
+            || !asString(request["method"], method) || method.empty()) {
+            sendMessage(errorResponse(id, "MalformedMessage", "缺少合法的 addr 或 method 字段"));
+            return;
+        }
+        const MsgPack& args = request["args"];
+        if (!args.is_binary()) {
+            sendMessage(errorResponse(id, "MalformedMessage", "args 字段必须是二进制"));
+            return;
+        }
+        if (!session->HasObject(addr)) {
+            sendMessage(errorResponse(id, "AddrInvalid", "addr 无效或已失效"));
+            return;
+        }
+        const MsgPack::binary& argsBytes = args.binary_items();
+        MsgPack::binary result;
+        const bool accepted = session->Invoke(
+            addr, method, ByteView(argsBytes.data(), argsBytes.size()),
+            [&result](ByteView view) {
+                result.assign(view.begin(), view.end());
+            });
+        if (!accepted) {
+            sendMessage(errorResponse(id, "OperationFailed", "对象拒绝执行方法: " + method));
+            return;
+        }
+        sendMessage(okResponse(id, {{"result", MsgPack(std::move(result))}}));
     }
 
     void handleSubscribeEvent(std::uint64_t id, const MsgPack& request) {

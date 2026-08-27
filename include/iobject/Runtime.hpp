@@ -29,6 +29,10 @@ struct RuntimeObjectBridge {
     const TypeDescription* types = nullptr;
     std::function<bool(const void*, DataChannelView, DataReceiver)> readData;
     std::function<bool(void*, DataChannelView, ByteInput)> writeData;
+    std::function<bool(void*, MethodView, ByteInput, DataReceiver)> invoke;
+    /// 可选：原生对象声明 BindRuntime(IRuntimeObject*) 时填充。
+    /// 节点构造完成后以节点指针回调一次（绑定）；节点析构时以 nullptr 回调一次（解绑）。
+    std::function<void(void*, IRuntimeObject*)> bindRuntime;
 };
 
 /// Static-library factory; callers should create nodes through Runtime.
@@ -144,6 +148,18 @@ RuntimeObjectBridge makeBridge(std::shared_ptr<void> lifetime, T* object) {
     }) {
         bridge.writeData = [](void* value, DataChannelView channel, ByteInput data) {
             return static_cast<T*>(value)->WriteData(channel, data);
+        };
+    }
+    if constexpr (requires(T& value, MethodView method, ByteInput args, DataReceiver result) {
+        { value.Invoke(method, args, std::move(result)) } -> std::convertible_to<bool>;
+    }) {
+        bridge.invoke = [](void* value, MethodView method, ByteInput args, DataReceiver result) {
+            return static_cast<T*>(value)->Invoke(method, args, std::move(result));
+        };
+    }
+    if constexpr (requires(T& value, IRuntimeObject* self) { value.BindRuntime(self); }) {
+        bridge.bindRuntime = [](void* value, IRuntimeObject* self) {
+            static_cast<T*>(value)->BindRuntime(self);
         };
     }
     return bridge;
