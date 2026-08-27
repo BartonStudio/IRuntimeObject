@@ -11,6 +11,10 @@ RuntimeDomain::RuntimeDomain()
     // unique_ptr 裸指针构造为 noexcept，若此处 new 抛异常 rootAnchor_ 仍会自动回收。
       bridgeRoot_(std::unique_ptr<RuntimeBridgeRoot>(new RuntimeBridgeRoot(rootAnchor_.get()))) {}
 
+RuntimeDomain::RuntimeDomain(IRuntimeObject* root)
+    : rootAnchor_(root),
+      bridgeRoot_(std::unique_ptr<RuntimeBridgeRoot>(new RuntimeBridgeRoot(rootAnchor_.get()))) {}
+
 RuntimeDomain::~RuntimeDomain() {
     bridgeRoot_.reset();  // 先停桥接入口。
     rootAnchor_.reset();  // 再销毁根锚点（析构自动执行释放流程）。

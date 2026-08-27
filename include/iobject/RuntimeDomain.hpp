@@ -15,7 +15,10 @@ class RuntimeBridgeRoot;
 /// 正常销毁顺序：先关闭全部 RuntimeSession，再销毁业务对象，最后销毁 RuntimeDomain。
 class RuntimeDomain final {
 public:
+    /// 默认构造：根锚点为空的纯运行时节点。
     RuntimeDomain();
+    /// 以自定义根节点构造：root 由本域接管所有权（析构时 delete）。
+    explicit RuntimeDomain(IRuntimeObject* root);
     ~RuntimeDomain();
 
     RuntimeDomain(const RuntimeDomain&) = delete;
