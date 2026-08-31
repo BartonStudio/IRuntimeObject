@@ -280,6 +280,7 @@ class RuntimeObject final : public IRuntimeObject {
 public:
     RuntimeObject(detail::RuntimeObjectBridge bridge, RuntimeTopology* topology)
         : lifetime_(std::move(bridge.lifetime)), object_(bridge.object), types_(bridge.types),
+          threadSafe_(bridge.threadSafe),
           readData_(std::move(bridge.readData)), writeData_(std::move(bridge.writeData)),
           invoke_(std::move(bridge.invoke)), bindRuntime_(std::move(bridge.bindRuntime)),
           topology_(topology) {}
@@ -331,7 +332,7 @@ public:
     }
 
     bool ReadData(DataChannelView channel, DataReceiver receiver) const override {
-        assertLoopThread();
+        if (!threadSafe_) assertLoopThread();
         if (state_ != RuntimeObjectState::Active || channel.empty() || !receiver || !readData_) {
             return false;
         }
@@ -339,7 +340,7 @@ public:
     }
 
     bool WriteData(DataChannelView channel, ByteInput data) override {
-        assertLoopThread();
+        if (!threadSafe_) assertLoopThread();
         if (state_ != RuntimeObjectState::Active || channel.empty() || !writeData_) {
             return false;
         }
@@ -347,7 +348,7 @@ public:
     }
 
     bool Invoke(MethodView method, ByteInput args, DataReceiver result) override {
-        assertLoopThread();
+        if (!threadSafe_) assertLoopThread();
         if (state_ != RuntimeObjectState::Active || method.empty() || !result || !invoke_) {
             return false;
         }
@@ -545,6 +546,7 @@ private:
     std::shared_ptr<void> lifetime_;
     void* object_ = nullptr;
     const detail::TypeDescription* types_ = nullptr;
+    bool threadSafe_ = false;
     std::function<bool(const void*, DataChannelView, DataReceiver)> readData_;
     std::function<bool(void*, DataChannelView, ByteInput)> writeData_;
     std::function<bool(void*, MethodView, ByteInput, DataReceiver)> invoke_;

@@ -27,6 +27,9 @@ struct RuntimeObjectBridge {
     std::shared_ptr<void> lifetime;
     void* object = nullptr;
     const TypeDescription* types = nullptr;
+    /// 原生对象声明 static constexpr bool kThreadSafe = true 时置为 true；
+    /// 此时 Invoke/ReadData/WriteData 跳过线程亲和断言。
+    bool threadSafe = false;
     std::function<bool(const void*, DataChannelView, DataReceiver)> readData;
     std::function<bool(void*, DataChannelView, ByteInput)> writeData;
     std::function<bool(void*, MethodView, ByteInput, DataReceiver)> invoke;
@@ -161,6 +164,9 @@ RuntimeObjectBridge makeBridge(std::shared_ptr<void> lifetime, T* object) {
         bridge.bindRuntime = [](void* value, IRuntimeObject* self) {
             static_cast<T*>(value)->BindRuntime(self);
         };
+    }
+    if constexpr (requires { { T::kThreadSafe } -> std::convertible_to<bool>; }) {
+        bridge.threadSafe = T::kThreadSafe;
     }
     return bridge;
 }

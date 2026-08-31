@@ -21,6 +21,9 @@ enum class LogLevel { Trace, Debug, Info, Warning, Error };
 /// 可单独包装成节点，也可组合进自定义根节点（转发这些钩子即可）。
 class Logger {
 public:
+    /// 标记：Invoke/ReadData/WriteData 内部已线程安全，框架跳过线程亲和断言。
+    static constexpr bool kThreadSafe = true;
+
     Logger() = default;
     ~Logger() = default;
 
