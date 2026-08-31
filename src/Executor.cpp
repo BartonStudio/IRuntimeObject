@@ -75,6 +75,44 @@ bool SingleThreadExecutor::IsOnExecutionThread() const {
         && impl_->owner == std::this_thread::get_id();
 }
 
+struct HostLoopExecutor::Impl {
+    HostLoopExecutor::RunCallback onRun;
+    HostLoopExecutor::PostCallback onPost;
+    HostLoopExecutor::StopCallback onStop;
+    HostLoopExecutor::IsLoopThreadCallback isOnLoopThread;
+
+    Impl(HostLoopExecutor::RunCallback r, HostLoopExecutor::PostCallback p,
+         HostLoopExecutor::StopCallback s, HostLoopExecutor::IsLoopThreadCallback i)
+        : onRun(std::move(r)), onPost(std::move(p)),
+          onStop(std::move(s)), isOnLoopThread(std::move(i)) {}
+};
+
+HostLoopExecutor::HostLoopExecutor(RunCallback onRun, PostCallback onPost,
+                                   StopCallback onStop, IsLoopThreadCallback isOnLoopThread)
+    : impl_(std::make_unique<Impl>(std::move(onRun), std::move(onPost),
+                                   std::move(onStop), std::move(isOnLoopThread))) {}
+
+HostLoopExecutor::~HostLoopExecutor() = default;
+
+void HostLoopExecutor::Post(std::function<void()> task) {
+    if (!task) return;
+    if (impl_->onPost) impl_->onPost(std::move(task));
+}
+
+void HostLoopExecutor::Run() {
+    detail::setLoopThread(std::this_thread::get_id());
+    if (impl_->onRun) impl_->onRun();
+    detail::setLoopThread(std::thread::id());
+}
+
+void HostLoopExecutor::Stop() noexcept {
+    if (impl_->onStop) impl_->onStop();
+}
+
+bool HostLoopExecutor::IsOnExecutionThread() const {
+    return impl_->isOnLoopThread && impl_->isOnLoopThread();
+}
+
 // —— 环境式入口 ——
 
 namespace detail {

@@ -47,6 +47,34 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+/// 宿主循环集成执行器：把 IObject 任务队列挂到宿主自有的消息泵上
+/// （例如 WebView2 / GLFW 等自带事件循环的宿主）。
+/// 宿主只需提供四个回调；Run() 内部会正确登记/清空循环线程，
+/// 保证 assertLoopThread() / IsOnLoopThread() 继续生效。
+class HostLoopExecutor final : public Executor {
+public:
+    using RunCallback = std::function<void()>;
+    using PostCallback = std::function<void(std::function<void()>)>;
+    using StopCallback = std::function<void()>;
+    using IsLoopThreadCallback = std::function<bool()>;
+
+    HostLoopExecutor(RunCallback onRun, PostCallback onPost,
+                     StopCallback onStop, IsLoopThreadCallback isOnLoopThread);
+    ~HostLoopExecutor() override;
+
+    HostLoopExecutor(const HostLoopExecutor&) = delete;
+    HostLoopExecutor& operator=(const HostLoopExecutor&) = delete;
+
+    void Post(std::function<void()> task) override;
+    void Run() override;
+    void Stop() noexcept override;
+    bool IsOnExecutionThread() const override;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
 /// —— 环境式事件循环入口 ——
 /// 委托给当前选中的执行器（默认懒初始化 SingleThreadExecutor）。
 /// 业务与外部类只认这几个自由函数，不认具体线程模型。
