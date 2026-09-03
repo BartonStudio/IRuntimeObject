@@ -35,3 +35,6 @@ target_include_directories(test_11_invoke PRIVATE ${CMAKE_SOURCE_DIR}/third_part
 
 add_executable(test_12_executor 12_ExecutorTest.cpp)
 target_link_libraries(test_12_executor PRIVATE IObject::IObject)
+
+add_executable(test_13_websocket_host 13_WebSocketHost.cpp)
+target_link_libraries(test_13_websocket_host PRIVATE IObject::IObject)

@@ -10,6 +10,7 @@ add_library(IObject STATIC
     src/RuntimeBridgeProtocol.cpp
     src/Executor.cpp
     src/Logger.cpp
+    src/WebSocketServer.cpp
     third_party/msgpack11/msgpack11.cpp
 )
 add_library(IObject::IObject ALIAS IObject)
@@ -22,10 +23,23 @@ target_include_directories(IObject
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/msgpack11
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/websocketpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/asio/include
 )
+
+# 内置 WebSocket 服务端（websocketpp + standalone Asio，均为仅头文件依赖）
+# WEBSOCKETPP_STANDALONE：websocketpp 通用组件改用 std；ASIO_STANDALONE：asio 不走 Boost。
+target_compile_definitions(IObject PRIVATE ASIO_STANDALONE=1 WEBSOCKETPP_STANDALONE=1)
+if(WIN32)
+    # Asio 需要的 Winsock 版本宏与系统库
+    target_compile_definitions(IObject PRIVATE _WIN32_WINNT=0x0601)
+    target_link_libraries(IObject PRIVATE ws2_32)
+endif()
 
 if(MSVC)
     target_compile_options(IObject PRIVATE /W4 /utf-8)
+    # 如实上报 __cplusplus 宏，websocketpp 据此启用 C++11 模式（不再依赖 Boost）
+    target_compile_options(IObject PRIVATE /Zc:__cplusplus)
     target_compile_options(IObject INTERFACE /utf-8)
 else()
     target_compile_options(IObject PRIVATE -Wall -Wextra -Wpedantic)
@@ -39,7 +53,7 @@ endif()
 option(BUILD_TESTS "Build automated tests" ON)
 if(BUILD_TESTS)
     enable_testing()
-    add_subdirectory(tests)
+    add_subdirectory(src/tests)
 endif()
 
 install(TARGETS IObject
@@ -56,6 +70,7 @@ install(FILES
     include/iobject/RuntimeBridgeProtocol.hpp
     include/iobject/Executor.hpp
     include/iobject/Logger.hpp
+    include/iobject/WebSocketServer.hpp
     DESTINATION include/iobject
 )
 install(EXPORT IObjectTargets

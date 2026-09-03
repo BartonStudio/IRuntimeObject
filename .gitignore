@@ -43,3 +43,6 @@ superkimi-master/
 
 # Local Git worktrees
 .worktrees/
+
+# Agent workspace data
+.workbuddy/

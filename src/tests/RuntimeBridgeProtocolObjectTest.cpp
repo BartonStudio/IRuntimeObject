@@ -110,14 +110,17 @@ int main() {
         TEST_CHECK(errorCode(loop.getChildItem(loop.root, "Player.Decoder")) == "MalformedMessage");
         TEST_CHECK(errorCode(loop.getChildItem(loop.root, "")) == "MalformedMessage");
 
-        // GetChildren 枚举：root -> [Player]
+        // GetChildren 枚举：root -> [Player, WebSocket]（按 childId 字典序；
+        // WebSocket 是 RuntimeDomain 内置的 WebSocket 服务端节点）。
         const MsgPack rootChildren = loop.getChildren(loop.root);
         TEST_CHECK(rootChildren["ok"].bool_value());
         TEST_CHECK(rootChildren["children"].is_array());
         const MsgPack::array& rootList = rootChildren["children"].array_items();
-        TEST_CHECK(rootList.size() == 1);
+        TEST_CHECK(rootList.size() == 2);
         TEST_CHECK(rootList[0]["name"].string_value() == "Player");
         TEST_CHECK(rootList[0]["addr"].int64_value() > 0);
+        TEST_CHECK(rootList[1]["name"].string_value() == "WebSocket");
+        TEST_CHECK(rootList[1]["addr"].int64_value() > 0);
 
         // player -> [Decoder]
         const MsgPack playerChildren = loop.getChildren(playerAddr);
