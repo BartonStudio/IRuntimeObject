@@ -374,4 +374,23 @@ bool RuntimeBridgePeer::IsOpen() const noexcept {
     return impl_->open;
 }
 
+std::string PeekConnectDomain(ByteView message) {
+    // 供传输层在握手前做路由：只提取 Connect 请求的 domain，不建立会话、不触碰对象树。
+    std::string parseError;
+    const MsgPack request = MsgPack::parse(
+        std::string(reinterpret_cast<const char*>(message.data()), message.size()), parseError);
+    if (!parseError.empty() || !request.is_object()) {
+        return {};
+    }
+    std::string op;
+    if (!asString(request["op"], op) || op != "Connect") {
+        return {};
+    }
+    std::string domain;
+    if (!asString(request["domain"], domain)) {
+        return {};
+    }
+    return domain;
+}
+
 } // namespace iobject

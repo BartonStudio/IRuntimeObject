@@ -1,10 +1,11 @@
 // 13_WebSocketHost：内置 WebSocket 服务端的实测宿主。
-// WebSocket 服务端为可选能力：由业务方显式调用 domain.startBuiltinWebSocketServer() 启动
-// （默认 0.0.0.0:9002，domain "iobject"）。这里再挂一个 Echo 业务对象，供远程客户端验证
+// WebSocket 服务端是「系统级传输服务」，由宿主创建并 BindDomain 注册路由
+// （默认 0.0.0.0:9002）。这里再挂一个 Echo 业务对象，供远程客户端验证
 // ReadData / Invoke / 事件主动推送（双向通信）。
 #include <iobject/Executor.hpp>
 #include <iobject/Runtime.hpp>
 #include <iobject/RuntimeDomain.hpp>
+#include <iobject/WebSocketServer.hpp>
 
 #include <cstdint>
 #include <cstdio>
@@ -53,8 +54,9 @@ private:
 int main() {
     iobject::RuntimeDomain domain;
 
-    // 显式启动内置 WebSocket 服务端（可选；默认端口 9002，domain "iobject"）。
-    domain.startBuiltinWebSocketServer();
+    // 启动 WebSocket 传输服务，注册 domain → 对象树入口 的路由（可注册多个域）。
+    iobject::WebSocketServer wsServer(iobject::WebSocketServer::Config{9002});
+    wsServer.BindDomain("iobject", domain.BridgeRoot());
 
     iobject::IRuntimeObject* echo = iobject::Runtime::make<EchoService>();
     echo->As<EchoService>()->SetNode(echo);

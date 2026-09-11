@@ -22,7 +22,6 @@
 
 #include <asio.hpp>
 
-#include <array>
 #include <atomic>
 #include <exception>
 #include <map>
@@ -38,7 +37,7 @@ namespace {
 using WsServer = websocketpp::server<websocketpp::config::asio>;
 
 /// 每个客户端连接一份：连接句柄 + 对应的协议端点。
-/// peer 的全部触碰（ReceiveMessage / 析构）都只发生在事件循环线程；
+/// peer 在首帧 Connect 握手后创建；peer 的 ReceiveMessage / 析构都只发生在事件循环线程；
 /// con 的 send/close 由 websocketpp 保证线程安全，可在任意线程调用。
 struct ConnState {
     WsServer::connection_ptr con;                 // 强引用，保连接对象存活。
@@ -52,8 +51,12 @@ struct ConnState {
 // =============================================================================
 
 struct WebSocketServer::Impl {
-    RuntimeBridgeRoot* bridgeRoot = nullptr;  // 非拥有，由 RuntimeDomain 持有。
     WebSocketServer::Config config;
+
+    // domain → 对象树入口 的路由表。BindDomain（宿主线程）与 onMessage（wspp 线程）
+    // 都会访问，故加锁；首帧路由只读表，不触碰对象树。
+    std::mutex domainsMutex;
+    std::map<std::string, RuntimeBridgeRoot*> domains;
 
     asio::io_service io;
     WsServer server;
@@ -70,17 +73,7 @@ struct WebSocketServer::Impl {
     void onOpen(websocketpp::connection_hdl hdl) {
         auto state = std::make_shared<ConnState>();
         state->con = server.get_con_from_hdl(hdl);
-        // peer 在此处构造是安全的：构造只登记回调，不触碰对象树；
-        // 真正的会话建立发生在协议层 Connect 握手（循环线程内）。
-        state->peer = std::make_unique<RuntimeBridgePeer>(
-            *bridgeRoot, config.domain,
-            [state](ByteView frame) {
-                // SendCallback 在事件循环线程被调用；connection::send 线程安全。
-                // 错误码以返回值交付；失败通常意味着连接已在关闭流程中，交由 on_close 收尾。
-                const std::string payload(reinterpret_cast<const char*>(frame.data()),
-                                           frame.size());
-                (void)state->con->send(payload, websocketpp::frame::opcode::binary);
-            });
+        // 不在这里建 peer：要等首帧 Connect 才知道路由到哪个域。
         {
             std::lock_guard<std::mutex> lock(connectionsMutex);
             connections.emplace(hdl.lock().get(), std::move(state));
@@ -126,9 +119,41 @@ struct WebSocketServer::Impl {
             }
             state = found->second;
         }
+
+        std::string payload = msg->get_payload();
+
+        // 首帧：握手路由。此步在 wspp 线程同步完成，只解析 + 查表 + 建 peer（构造不触碰对象树）。
+        if (!state->peer) {
+            const std::string domain = PeekConnectDomain(ByteView(
+                reinterpret_cast<const std::uint8_t*>(payload.data()), payload.size()));
+            RuntimeBridgeRoot* root = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(domainsMutex);
+                const auto found = domains.find(domain);
+                if (found != domains.end()) {
+                    root = found->second;
+                }
+            }
+            if (root == nullptr) {
+                log.Log(LogLevel::Error, "WebSocket",
+                        "Connect 的 domain 未注册: " + (domain.empty() ? std::string("(空/畸形)") : domain));
+                websocketpp::lib::error_code ec;
+                state->con->close(websocketpp::close::status::policy_violation,
+                                  "domain not found", ec);
+                return;
+            }
+            state->peer = std::make_unique<RuntimeBridgePeer>(
+                *root, domain,
+                [state](ByteView frame) {
+                    // SendCallback 在事件循环线程被调用；connection::send 线程安全。
+                    const std::string out(reinterpret_cast<const char*>(frame.data()),
+                                          frame.size());
+                    (void)state->con->send(out, websocketpp::frame::opcode::binary);
+                });
+        }
+
         // 拷贝一份字节并封回事件循环线程；shared_ptr 保证 ConnState 存活，
         // state->peer 判空覆盖"销毁任务已先执行"的边界。
-        std::string payload = msg->get_payload();
         iobject::Post([state, payload = std::move(payload)]() {
             if (!state->peer) {
                 return;
@@ -143,10 +168,9 @@ struct WebSocketServer::Impl {
 // 构造 / 析构
 // =============================================================================
 
-WebSocketServer::WebSocketServer(RuntimeBridgeRoot& bridgeRoot, Config config)
+WebSocketServer::WebSocketServer(Config config)
     : impl_(std::make_unique<Impl>()) {
-    impl_->bridgeRoot = &bridgeRoot;
-    impl_->config = std::move(config);
+    impl_->config = config;
 
     // 屏蔽 websocketpp 自身的控制台日志，统一走 iobject Logger。
     impl_->server.get_alog().clear_channels(websocketpp::log::alevel::all);
@@ -185,8 +209,7 @@ WebSocketServer::WebSocketServer(RuntimeBridgeRoot& bridgeRoot, Config config)
     impl_->thread = std::thread([impl = impl_.get()]() { impl->io.run(); });
     impl_->running.store(true);
     impl_->log.Log(LogLevel::Info, "WebSocket",
-                    "服务端已启动: port=" + std::to_string(impl_->config.port)
-                        + ", domain=" + impl_->config.domain);
+                    "服务端已启动: port=" + std::to_string(impl_->config.port));
 }
 
 WebSocketServer::~WebSocketServer() {
@@ -194,8 +217,16 @@ WebSocketServer::~WebSocketServer() {
 }
 
 // =============================================================================
-// 状态查询
+// 状态查询 / 路由注册
 // =============================================================================
+
+void WebSocketServer::BindDomain(std::string domain, RuntimeBridgeRoot& root) {
+    if (domain.empty()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(impl_->domainsMutex);
+    impl_->domains[std::move(domain)] = &root;
+}
 
 bool WebSocketServer::IsRunning() const noexcept {
     return impl_ && impl_->running.load();
@@ -203,11 +234,6 @@ bool WebSocketServer::IsRunning() const noexcept {
 
 std::uint16_t WebSocketServer::Port() const noexcept {
     return impl_ ? impl_->config.port : 0;
-}
-
-const std::string& WebSocketServer::Domain() const noexcept {
-    static const std::string kEmpty;
-    return impl_ ? impl_->config.domain : kEmpty;
 }
 
 // =============================================================================
@@ -252,22 +278,6 @@ void WebSocketServer::Stop() noexcept {
             }
         });
     }
-}
-
-// =============================================================================
-// 原生对象契约
-// =============================================================================
-
-bool WebSocketServer::ReadData(DataChannelView channel, DataReceiver receiver) const {
-    if (channel == "Port") {
-        const std::uint16_t port = Port();
-        const std::array<std::uint8_t, 2> bytes{
-            static_cast<std::uint8_t>((port >> 8) & 0xff),
-            static_cast<std::uint8_t>(port & 0xff)};
-        receiver(ByteView(bytes.data(), bytes.size()));
-        return true;
-    }
-    return false;
 }
 
 } // namespace iobject

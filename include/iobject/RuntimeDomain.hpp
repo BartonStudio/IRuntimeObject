@@ -2,23 +2,21 @@
 
 #include <memory>
 
-#include "WebSocketServer.hpp"
-
 namespace iobject {
 
 class IRuntimeObject;
 class RuntimeBridgeRoot;
 
-/// 运行时域：第一版对应进程内默认全局拓扑，自动创建并持有唯一根锚点与桥接入口。
+/// 运行时域：对应进程内默认全局拓扑，自动创建并持有唯一根锚点与桥接入口。
 /// 一个活动 IRuntimeObject 同一时刻有且仅属于一个域，生命周期内不迁移。
 /// 第一版每个进程只应存在一个 RuntimeDomain 实例；多个实例会共享同一全局拓扑，
 /// 跨"域"关系不会被阻止。
 /// 硬约束（约定，不加运行时分支）：域及桥接服务存活期间，不得对根锚点 Release 或 delete。
 /// 正常销毁顺序：先关闭全部 RuntimeSession，再销毁业务对象，最后销毁 RuntimeDomain。
 ///
-/// 内置 WebSocket 远程服务端（websocketpp）为【可选】能力：默认不自动启动，
-/// 由业务方按需调用 startBuiltinWebSocketServer() 启动，并以 "WebSocket" 子节点
-/// 挂在根锚点下（只读通道 "Port"）。启动失败（如端口被占用）仅记日志，不影响域本身。
+/// 【职责边界】域只负责「一棵对象树 + 它的桥接入口」，是远程访问能力的来源；
+/// 传输手段（WebSocket / webview 等）不属于域——由宿主（app）按需创建并把某个域的
+/// BridgeRoot() 注册进去（见 WebSocketServer::BindDomain）。域本身保持传输无关。
 class RuntimeDomain final {
 public:
     /// 默认构造：根锚点为空的纯运行时节点。
@@ -35,18 +33,11 @@ public:
     /// 域内唯一桥接入口；所有远程会话经它创建。
     RuntimeBridgeRoot& BridgeRoot() const noexcept;
 
-    /// 可选：启动内置 WebSocket 远程服务端，并以 "WebSocket" 子节点挂在根锚点下。
-    /// 可传入自定义端口/域名；默认监听 9002、握手域名 "iobject"。
-    /// 重复调用会先停掉旧实例再启动新的。启动失败不抛异常，仅记日志。
-    void startBuiltinWebSocketServer(WebSocketServer::Config config = WebSocketServer::Config{});
-
 private:
     // 声明顺序是正确性依赖，析构顺序与之相反：
-    //   webSocketServer_（停 ws 服务并关闭全部远程会话）
-    //   → bridgeRoot_（撤桥接入口）→ rootAnchor_（销毁根锚点）。不得调换。
+    //   bridgeRoot_（撤桥接入口）→ rootAnchor_（销毁根锚点）。不得调换。
     std::unique_ptr<IRuntimeObject> rootAnchor_;
     std::unique_ptr<RuntimeBridgeRoot> bridgeRoot_;
-    std::unique_ptr<IRuntimeObject> webSocketServer_;
 };
 
 } // namespace iobject
