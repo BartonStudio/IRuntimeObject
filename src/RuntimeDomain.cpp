@@ -3,16 +3,25 @@
 #include <iobject/Runtime.hpp>
 #include <iobject/RuntimeBridge.hpp>
 
+#include <utility>
+
 namespace iobject {
 
 RuntimeDomain::RuntimeDomain()
-    : rootAnchor_(Runtime::make()),
+    : name_(),
+      rootAnchor_(Runtime::make()),
       // RuntimeBridgeRoot 构造为私有，friend 关系不传递到 make_unique，故用直接 new 包裹；
       // unique_ptr 裸指针构造为 noexcept，若此处 new 抛异常 rootAnchor_ 仍会自动回收。
       bridgeRoot_(std::unique_ptr<RuntimeBridgeRoot>(new RuntimeBridgeRoot(rootAnchor_.get()))) {}
 
-RuntimeDomain::RuntimeDomain(IRuntimeObject* root)
-    : rootAnchor_(root),
+RuntimeDomain::RuntimeDomain(IRuntimeObject* root, std::string name)
+    : name_(std::move(name)),
+      rootAnchor_(root),
+      bridgeRoot_(std::unique_ptr<RuntimeBridgeRoot>(new RuntimeBridgeRoot(rootAnchor_.get()))) {}
+
+RuntimeDomain::RuntimeDomain(std::string name)
+    : name_(std::move(name)),
+      rootAnchor_(Runtime::make()),
       bridgeRoot_(std::unique_ptr<RuntimeBridgeRoot>(new RuntimeBridgeRoot(rootAnchor_.get()))) {}
 
 RuntimeDomain::~RuntimeDomain() {
@@ -28,6 +37,10 @@ IRuntimeObject* RuntimeDomain::RootAnchor() const noexcept {
 
 RuntimeBridgeRoot& RuntimeDomain::BridgeRoot() const noexcept {
     return *bridgeRoot_;
+}
+
+const std::string& RuntimeDomain::Name() const noexcept {
+    return name_;
 }
 
 } // namespace iobject

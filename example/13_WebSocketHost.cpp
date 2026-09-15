@@ -52,11 +52,12 @@ private:
 } // namespace
 
 int main() {
-    iobject::RuntimeDomain domain;
+    iobject::RuntimeDomain domain("iobject");
 
     // 启动 WebSocket 传输服务，注册 domain → 对象树入口 的路由（可注册多个域）。
+    // 路由键取自 domain.Name()，一棵树一个名字，无别名。
     iobject::WebSocketServer wsServer(iobject::WebSocketServer::Config{9002});
-    wsServer.BindDomain("iobject", domain.BridgeRoot());
+    wsServer.BindDomain(domain);
 
     iobject::IRuntimeObject* echo = iobject::Runtime::make<EchoService>();
     echo->As<EchoService>()->SetNode(echo);

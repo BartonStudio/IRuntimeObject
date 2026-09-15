@@ -6,13 +6,14 @@
 
 namespace iobject {
 
-class RuntimeBridgeRoot;
+class RuntimeDomain;
 
 /// IObject 内置 WebSocket 远程传输服务端（传输载体：websocketpp + standalone Asio）。
 ///
 /// 【定位】它是「系统级传输服务」，不是域（RuntimeDomain）的成员，也不是对象树里的节点。
 /// 一个进程通常只建一个实例；一个实例可服务多个域（多棵对象树）：经 BindDomain 注册
-/// 「domain → 对象树入口」的路由表，客户端 Connect{domain} 时据此把会话挂到对应树。
+/// 「域名字 → 对象树入口」的路由表，客户端 Connect{domain} 时据此把会话挂到对应树。
+/// 域的名字取自 RuntimeDomain::Name()，一棵树一个名字，1:1，无别名。
 ///
 /// 【隔离】会话由「它 Connect 的那个 domain 的 bridgeRoot」开出来，句柄与对象树只属于
 /// 那棵树；不同 domain 的对象互不可见，B 域里找不到 A 域的对象。
@@ -42,10 +43,10 @@ public:
     WebSocketServer(const WebSocketServer&) = delete;
     WebSocketServer& operator=(const WebSocketServer&) = delete;
 
-    /// 注册「domain → 对象树入口」路由。客户端 Connect{domain} 时按它路由。
-    /// 未注册的 domain 在握手时被拒绝（DomainNotFound 并断开）。同名 domain 覆盖旧映射。
-    /// 线程安全，可在监听启动前后调用。
-    void BindDomain(std::string domain, RuntimeBridgeRoot& root);
+    /// 注册一个域到路由表：以 domain.Name() 作为路由键，指向 domain.BridgeRoot()。
+    /// 客户端 Connect{domain} 时按它路由；未注册的名字在握手时被拒绝（DomainNotFound 并断开）。
+    /// 未命名（Name() 为空）的域会被忽略。同名覆盖旧映射。线程安全，可在监听启动前后调用。
+    void BindDomain(RuntimeDomain& domain);
 
     /// 端口监听是否成功建立（含后台线程存活）。
     bool IsRunning() const noexcept;

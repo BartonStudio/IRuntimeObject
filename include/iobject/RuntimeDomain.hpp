@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <string>
 
 namespace iobject {
 
@@ -15,14 +16,19 @@ class RuntimeBridgeRoot;
 /// 正常销毁顺序：先关闭全部 RuntimeSession，再销毁业务对象，最后销毁 RuntimeDomain。
 ///
 /// 【职责边界】域只负责「一棵对象树 + 它的桥接入口」，是远程访问能力的来源；
-/// 传输手段（WebSocket / webview 等）不属于域——由宿主（app）按需创建并把某个域的
-/// BridgeRoot() 注册进去（见 WebSocketServer::BindDomain）。域本身保持传输无关。
+/// 传输手段（WebSocket / webview 等）不属于域——由宿主（app）按需创建并把域注册进去
+/// （见 WebSocketServer::BindDomain）。域本身保持传输无关。
+///
+/// 【名字（name）】一棵树一个名字，1:1。name 是「域路由键」：远程客户端 Connect 时用
+/// 同名字符串声明要连哪棵树，传输层据此路由。空名表示未命名（不可被 BindDomain 路由）。
 class RuntimeDomain final {
 public:
-    /// 默认构造：根锚点为空的纯运行时节点。
+    /// 默认构造：根锚点为空的纯运行时节点（未命名）。
     RuntimeDomain();
     /// 以自定义根节点构造：root 由本域接管所有权（析构时 delete）。
-    explicit RuntimeDomain(IRuntimeObject* root);
+    explicit RuntimeDomain(IRuntimeObject* root, std::string name = {});
+    /// 以空根节点 + 名字构造。
+    explicit RuntimeDomain(std::string name);
     ~RuntimeDomain();
 
     RuntimeDomain(const RuntimeDomain&) = delete;
@@ -32,10 +38,13 @@ public:
     IRuntimeObject* RootAnchor() const noexcept;
     /// 域内唯一桥接入口；所有远程会话经它创建。
     RuntimeBridgeRoot& BridgeRoot() const noexcept;
+    /// 域的名字（路由键）；空串表示未命名。
+    const std::string& Name() const noexcept;
 
 private:
     // 声明顺序是正确性依赖，析构顺序与之相反：
-    //   bridgeRoot_（撤桥接入口）→ rootAnchor_（销毁根锚点）。不得调换。
+    //   bridgeRoot_（撤桥接入口）→ rootAnchor_（销毁根锚点）。name_ 与二者无依赖。
+    std::string name_;
     std::unique_ptr<IRuntimeObject> rootAnchor_;
     std::unique_ptr<RuntimeBridgeRoot> bridgeRoot_;
 };

@@ -4,6 +4,7 @@
 #include <iobject/Logger.hpp>
 #include <iobject/RuntimeBridge.hpp>
 #include <iobject/RuntimeBridgeProtocol.hpp>
+#include <iobject/RuntimeDomain.hpp>
 
 // —— websocketpp / standalone Asio 仅在本实现文件内出现，公共头保持零依赖 ——
 
@@ -220,12 +221,13 @@ WebSocketServer::~WebSocketServer() {
 // 状态查询 / 路由注册
 // =============================================================================
 
-void WebSocketServer::BindDomain(std::string domain, RuntimeBridgeRoot& root) {
-    if (domain.empty()) {
-        return;
+void WebSocketServer::BindDomain(RuntimeDomain& domain) {
+    const std::string& name = domain.Name();
+    if (name.empty()) {
+        return;  // 未命名的域无法路由，忽略。
     }
     std::lock_guard<std::mutex> lock(impl_->domainsMutex);
-    impl_->domains[std::move(domain)] = &root;
+    impl_->domains[name] = &domain.BridgeRoot();
 }
 
 bool WebSocketServer::IsRunning() const noexcept {
