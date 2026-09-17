@@ -46,3 +46,8 @@ superkimi-master/
 
 # Agent workspace data
 .workbuddy/
+
+# Node.js / pnpm
+node_modules/
+.pnpm-store/
+debug.log

@@ -1,0 +1,31 @@
+{
+  "name": "iobject-js",
+  "version": "0.1.0",
+  "private": true,
+  "description": "IObject 远程桥接协议（MessagePack over WebSocket binary）的 JS/TS 客户端",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "smoke": "node example/smoke.mjs"
+  },
+  "dependencies": {
+    "@msgpack/msgpack": "^3.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}
