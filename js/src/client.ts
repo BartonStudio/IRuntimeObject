@@ -14,6 +14,7 @@ import { Subscription } from "./subscription.js";
 import {
   defaultWebSocketCtor,
   toUint8Array,
+  webviewSocket,
   type WebSocketCtor,
   type WebSocketLike,
 } from "./transport.js";
@@ -35,6 +36,16 @@ interface Pending {
   reject: (reason: unknown) => void;
 }
 
+/** 把可选连接参数归一化为全量参数（默认 WebSocket 构造器 / 默认超时）。 */
+function normalizeOptions(options: ConnectOptions): Required<ConnectOptions> {
+  return {
+    domain: options.domain,
+    WebSocket: options.WebSocket ?? defaultWebSocketCtor(),
+    protocols: options.protocols ?? [],
+    openTimeoutMs: options.openTimeoutMs ?? 10_000,
+  };
+}
+
 /** 解码后的响应/事件帧（宽松的 map）。 */
 type Frame = Record<string, unknown>;
 
@@ -46,7 +57,6 @@ export class IObjectClient {
   /** 根锚点；握手成功后可用。 */
   readonly root!: RemoteObject;
 
-  private readonly ws: WebSocketLike;
   private nextId: RequestId = 1;
   private readonly pending = new Map<RequestId, Pending>();
   private readonly handlers = new Map<SubscriptionId, EventHandler>();
@@ -56,11 +66,9 @@ export class IObjectClient {
   private openResolvers?: { resolve: () => void; reject: (reason: unknown) => void };
 
   private constructor(
-    url: string,
+    private readonly ws: WebSocketLike,
     private readonly opts: Required<ConnectOptions>,
   ) {
-    const Ctor = opts.WebSocket;
-    this.ws = new Ctor(url, opts.protocols);
     try {
       this.ws.binaryType = "arraybuffer";
     } catch {
@@ -76,18 +84,25 @@ export class IObjectClient {
     };
   }
 
-  /** 建立连接并完成 Connect 握手，返回已就绪的客户端。 */
+  /** 建立 WebSocket 连接并完成 Connect 握手，返回已就绪的客户端。 */
   static async connect(url: string, options: ConnectOptions): Promise<IObjectClient> {
-    const opts: Required<ConnectOptions> = {
-      domain: options.domain,
-      WebSocket: options.WebSocket ?? defaultWebSocketCtor(),
-      protocols: options.protocols ?? [],
-      openTimeoutMs: options.openTimeoutMs ?? 10_000,
-    };
-    const client = new IObjectClient(url, opts);
+    const opts = normalizeOptions(options);
+    const client = new IObjectClient(new opts.WebSocket(url, opts.protocols), opts);
+    return IObjectClient.establish(client, opts.domain);
+  }
+
+  /** 经 WebView2 内进程共享内存通道建立连接（无需 WebSocket / 端口）。 */
+  static async connectWebview(options: ConnectOptions): Promise<IObjectClient> {
+    const opts = normalizeOptions(options);
+    const client = new IObjectClient(webviewSocket(), opts);
+    return IObjectClient.establish(client, opts.domain);
+  }
+
+  /** 握手收尾：等传输就绪 → Connect → 解析根锚点。connect / connectWebview 共用。 */
+  private static async establish(client: IObjectClient, domain: string): Promise<IObjectClient> {
     try {
       await client.waitOpen();
-      const res = await client.request("Connect", { domain: opts.domain });
+      const res = await client.request("Connect", { domain });
       const rootAddr = asNumber(res.root, "root");
       if (rootAddr === 0) {
         throw new IObjectError("OperationFailed", "握手成功但根锚点 addr 为 0");
@@ -95,7 +110,7 @@ export class IObjectClient {
       (client as { root: RemoteObject }).root = new RemoteObject(client, rootAddr);
       return client;
     } catch (error) {
-      // 握手失败（如 DomainNotFound）时关闭底层 socket，避免悬挂句柄拖住事件循环。
+      // 握手失败（如 DomainNotFound）时关闭底层传输，避免悬挂句柄拖住事件循环。
       client.ws.close();
       client.finalize(
         error instanceof IObjectError ? error : new IObjectError("OperationFailed", String(error)),
@@ -145,18 +160,43 @@ export class IObjectClient {
     await this.request("CancelEvent", { subscription });
   }
 
-  /** 低层请求入口：编码信封 -> 发送 -> 按 id 关联响应。 */
-  async request(op: Op, fields: Record<string, unknown> = {}): Promise<Frame> {
+  /** 低层请求入口：编码信封 -> 发送 -> 按 id 关联响应；超时未响应则 reject（默认 10s）。 */
+  async request(op: Op, fields: Record<string, unknown> = {}, timeoutMs = 10_000): Promise<Frame> {
     if (this.closed) {
       throw new IObjectError("SessionNotEstablished", "会话未建立或已关闭");
     }
     const id = this.nextId++;
     const message: Record<string, unknown> = { id, op, ...fields };
     return new Promise<Frame>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        this.pending.delete(id);
+        reject(new IObjectError("OperationFailed", `请求超时（${op}，${timeoutMs}ms）`));
+      }, timeoutMs);
+
+      this.pending.set(id, {
+        resolve: (value) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(value);
+        },
+        reject: (reason) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(reason);
+        },
+      });
+
       try {
         this.ws.send(encode(message));
       } catch (error) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
         this.pending.delete(id);
         reject(error);
       }
