@@ -77,6 +77,15 @@ struct DataChannelChangedEventData final {
     DataChannel channel;
 };
 
+/// 事件直接载荷：一段不透明字节（一次性事件参数）。
+/// 跨桥层识别后把 bytes 直接放进事件帧的 data 字段，无需源对象 ReadData 通道。
+/// 与 DataChannelChangedEventData 互补：后者表示「通道变了，去读源对象」，前者表示「事件自带参数」。
+struct EventPayloadData final {
+    explicit EventPayloadData(std::vector<std::uint8_t> bytes) : bytes(std::move(bytes)) {}
+
+    std::vector<std::uint8_t> bytes;
+};
+
 struct RuntimeObjectEvent {
     RuntimeEventType type;
     const IRuntimeObject* source = nullptr;

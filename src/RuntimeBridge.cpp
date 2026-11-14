@@ -169,6 +169,9 @@ std::uint64_t RuntimeSession::SubscribeEvent(RemoteObjectHandle handle, RuntimeE
                 if (const DataChannelChangedEventData* changed =
                         event.data->As<DataChannelChangedEventData>()) {
                     message.channel = changed->channel;
+                } else if (const EventPayloadData* payload =
+                        event.data->As<EventPayloadData>()) {
+                    message.data = payload->bytes;
                 }
             }
             // 数据快照：通道变化通知在派发窗口内同步读取源对象；读失败则不携带 data。
