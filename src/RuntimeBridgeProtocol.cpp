@@ -322,8 +322,12 @@ struct RuntimeBridgePeer::Impl {
 
     void handleConnect(std::uint64_t id, const MsgPack& request) {
         if (session != nullptr) {
-            sendMessage(errorResponse(id, "OperationFailed", "会话已建立，忽略重复 Connect"));
-            return;
+            // 页面刷新（webview reload）会带着全新的前端上下文重新握手：
+            // 旧 session 早已随旧页面消亡，这里重置后按正常流程建立新会话，
+            // 而不是报错拒绝（否则刷新后整条链路都无法使用）。
+            subscriptions.clear();
+            session->Close();
+            session.reset();
         }
         std::string domain;
         if (!asString(request["domain"], domain) || domain.empty()) {
